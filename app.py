@@ -108,6 +108,14 @@ def pct_control(label: str, cap_pct: int, default_pct: int, key: str) -> int:
     return st.session_state[sl]
 
 
+def monthly_scale_factor() -> float:
+    """관측 기간 → 30일 환산 배율. 품목 플랜의 금액 단위를 대시보드와
+    동일한 '월 환산'으로 통일하기 위함 (단위 불일치 버그 수정)."""
+    dates = pd.to_datetime(tx["date"])
+    days = (dates.max() - dates.min()).days + 1
+    return 30.0 / max(days, 1)
+
+
 def fmt_months(m: float) -> str:
     """1개월 미만은 일 단위로 표시 (며칠짜리 목표가 0.1개월로 뭉개지던 문제)."""
     if m is None:
@@ -219,6 +227,12 @@ def _get_item_verdicts(category: str, target: int, items: list[dict],
                     g["ratio"] = 1.0
                 if g["verdict"] == "keep":
                     g["ratio"] = 0.0
+            if min_secured is not None:
+                sec = sum(round(sum(items[i]["amount"] for i in g["item_ids"])
+                                * g["ratio"]) for g in parsed)
+                if sec <= min_secured:
+                    raise ValueError(
+                        f"확보액 {sec}원이 기본 플랜({min_secured}원) 이하")
             verdicts = parsed
             break
         except Exception as e:
@@ -243,13 +257,24 @@ def render_item_plan(targets: dict[str, int],
     secured_map = {}
     for category, target in targets.items():
         base = suggest_items(tx, category, max(target, 1))
-        items = base["all_items"]
+        scale = monthly_scale_factor()
+        items = [{**it, "amount": round(it["amount"] * scale)}
+                 for it in base["all_items"]]
         if not items:
             st.info(f"{category}에 조절 가능한 구매 내역이 없어요.")
             continue
-        verdicts = _get_item_verdicts(
-            category, target, items,
-            min_secured=(min_secured or {}).get(category))
+        pool_total = sum(it["amount"] for it in items)
+        clamped = target > pool_total
+        target = min(target, pool_total)  # 목표는 카테고리 월 지출을 넘을 수 없음
+        ms = (min_secured or {}).get(category)
+        if ms is not None and ms >= pool_total * 0.99:
+            st.info(f"[{category}] 기본 플랜이 이미 이 카테고리에서 확보 "
+                    f"가능한 최대치({won(pool_total)})예요 — 추가 절감은 "
+                    f"다른 카테고리에서 찾아보세요.")
+            secured_map[category] = ms
+            continue
+        verdicts = _get_item_verdicts(category, target, items,
+                                      min_secured=ms)
 
         with st.expander("아이콘이 뭘 뜻하나요?"):
             st.markdown("🛑 **보류** — 이번 달엔 이 구매를 하지 않기  \n"
@@ -289,10 +314,12 @@ def render_item_plan(targets: dict[str, int],
         act = sorted([r for r in rows if r["_amt"] > 0],
                      key=lambda r: -r["_amt"])[:5]
 
-        pool_total = sum(it["amount"] for it in items)
         pct = min(secured / target, 1.0) if target else 0
         st.markdown(f"**[{category}] 월 {won(target)} 만들기** — 아래 "
                     f"{len(act)}개 행동으로 목표의 **{pct*100:.0f}%** 확보")
+        if clamped:
+            st.caption(f"ℹ️ 요청한 목표가 이 카테고리 월 지출을 넘어서, "
+                       f"확보 가능한 최대치({won(pool_total)})로 조정했어요.")
         table_rows = [{k: r[k] for k in ("판정", "품목", "확보 금액")}
                       for r in act]
         table_rows.append({"판정": "Σ 합계",
@@ -301,12 +328,8 @@ def render_item_plan(targets: dict[str, int],
         st.dataframe(pd.DataFrame(table_rows), hide_index=True,
                      width='stretch')
         st.progress(pct, text=f"확보 {won(secured)} / 목표 {won(target)}")
-        if target > pool_total:
-            st.caption(f"ℹ️ 이 카테고리의 전체 지출({won(pool_total)})이 "
-                       f"목표보다 작아서, 전부 줄여도 100% 달성은 불가능해요. "
-                       f"부족분은 다른 카테고리에서 채워야 해요.")
         st.caption("🤖 AI 품목 추천은 목표 전액 커버를 보장하지 않아요 — "
-                   "초록 막대가 '이 플랜대로 하면 확보되는 비율'이에요.")
+                   "막대가 '이 플랜대로 하면 확보되는 비율'이에요.")
 
         # 유지 항목은 별도 표로 — '안 줄여도 되는 것'도 명확한 정보.
         # AI가 판정에서 빠뜨린 품목은 자동으로 '유지'로 분류해 항상 표시.
@@ -325,7 +348,7 @@ def render_item_plan(targets: dict[str, int],
                 k_names += f" 외 {len(g['item_ids']) - 3}건"
             k_amt = sum(items[i]["amount"] for i in g["item_ids"])
             keep_rows.append({"품목": k_names,
-                              "지출 (관측 기간)": won(k_amt),
+                              "지출 (월 환산)": won(k_amt),
                               "이유": g.get("action") or "생활 유지 필요"})
         st.markdown("**✅ 그대로 둬도 되는 것**")
         if keep_rows:
@@ -334,7 +357,7 @@ def render_item_plan(targets: dict[str, int],
         else:
             st.caption("이번 플랜은 목표 달성을 위해 모든 품목을 절감 "
                        "대상으로 판정했어요 — 유지 항목이 없습니다.")
-        st.caption("확보 금액은 관측 기간 실지출 기준 추정치예요.")
+        st.caption("금액은 대시보드와 같은 30일(월) 환산 기준이에요.")
         secured_map[category] = secured
     return secured_map
 
