@@ -146,7 +146,7 @@ def _get_item_verdicts(category: str, target: int,
 
     api_key = get_api_key()
     verdicts = None
-    if api_key:
+    for _attempt in range(2 if api_key else 0):
         try:
             import anthropic
             client = anthropic.Anthropic(api_key=api_key)
@@ -169,7 +169,11 @@ def _get_item_verdicts(category: str, target: int,
                     "keep(꼭 필요)은 ratio 0\n"
                     "3. 확보 합계(품목 금액 합 × ratio)가 목표 절감액의 "
                     "90~115%가 되도록 판정을 구성\n"
-                    "4. 비슷한 품목은 한 그룹으로 묶기 (그룹 4~6개 이내)"),
+                    "4. 비슷한 품목은 한 그룹으로 묶기 (그룹 4~6개 이내)\n"
+                    "5. action에 '40% 감소' 같은 퍼센트·비율 표현 금지. "
+                    "구체적 행동만: hold는 '다음 달로 미루기'류, reduce는 "
+                    "무엇을 덜 하는지(예: '주말에만 방문'), substitute는 "
+                    "무엇으로 바꾸는지(예: '홈케어로 대체')를 명시"),
                 messages=[{"role": "user", "content":
                            f"카테고리: {category}\n"
                            f"월 절감 목표: {target}원\n품목:\n{items_txt}"}])
@@ -188,10 +192,14 @@ def _get_item_verdicts(category: str, target: int,
                 if g["verdict"] == "keep":
                     g["ratio"] = 0.0
             verdicts = parsed
+            break
         except Exception:
             verdicts = None
-    if verdicts is None:
+    used_fallback = verdicts is None
+    if used_fallback:
         verdicts = fallback()
+        for g in verdicts:
+            g["_fallback"] = True
     st.session_state[key] = verdicts
     return verdicts
 
@@ -207,6 +215,20 @@ def render_item_plan(targets: dict[str, int]) -> None:
             continue
         verdicts = _get_item_verdicts(category, target, items)
 
+        with st.expander("아이콘이 뭘 뜻하나요?"):
+            st.markdown("🛑 **보류** — 이번 달엔 이 구매를 하지 않기  \n"
+                        "⏸ **횟수 줄이기** — 반복 구매의 횟수를 낮추기 "
+                        "(옆에 '관측 N회 → M회'로 표시)  \n"
+                        "🔁 **대체** — 더 저렴한 대안으로 바꾸기  \n"
+                        "✅ **유지** — 지금처럼 써도 괜찮은 것")
+        if any(g.get("_fallback") for g in verdicts):
+            st.warning("AI 판정 연결이 잠시 안 돼서 '금액 큰 순 보류' 기본 "
+                       "플랜을 보여드리고 있어요.")
+            if st.button("🔄 AI 플랜 다시 생성",
+                         key=f"regen_{category}_{target}"):
+                st.session_state.pop(f"vrd_{category}_{target}", None)
+                st.rerun()
+
         rows, secured = [], 0
         for g in verdicts:
             amt = round(sum(items[i]["amount"] for i in g["item_ids"])
@@ -216,7 +238,13 @@ def render_item_plan(targets: dict[str, int]) -> None:
             if len(g["item_ids"]) > 3:
                 names += f" 외 {len(g['item_ids']) - 3}건"
             icon, label = VERDICT_META[g["verdict"]]
-            rows.append({"판정": f"{icon} {g.get('action') or label}",
+            verdict_txt = f"{icon} {g.get('action') or label}"
+            if g["verdict"] == "reduce":
+                # 퍼센트 대신 실제 구매 횟수로 번역 (코드가 데이터에서 계산)
+                n = len(g["item_ids"])
+                m = max(round(n * (1 - g["ratio"])), 0)
+                verdict_txt += f" · 관측 {n}회 → {m}회"
+            rows.append({"판정": verdict_txt,
                          "품목": names, "_amt": amt,
                          "확보 금액": won(amt) if amt else "—"})
             secured += amt
