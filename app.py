@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from classifier import classify
+from flex_ingest import ingest as flex_ingest
 from gti_engine import (CUT_CAPS, DEFAULT_CAP, UserProfile, calc_gti,
                         cut_rankings, detect_anomalies, event_budget,
                         get_spending_summary, plan_cuts, purchase_impact,
@@ -175,26 +176,21 @@ def _get_item_verdicts(category: str, target: int, items: list[dict],
                     "당신은 지출 코칭 판정기입니다. JSON 배열만 출력하세요. "
                     "마크다운 백틱, 설명, 다른 텍스트 금지.\n"
                     "각 원소: {\"item_ids\": [번호들], \"verdict\": "
-                    "\"hold|reduce|substitute|keep\", \"ratio\": 0~1 숫자, "
+                    "\"hold|reduce|keep\", \"ratio\": 0~1 숫자, "
                     "\"action\": \"15자 이내 행동 문구\"}\n"
                     "규칙:\n"
                     "1. 모든 품목 번호를 정확히 한 번씩 어느 그룹에든 배정\n"
                     "2. hold(대형 단발 구매 보류)는 ratio 1.0 / "
-                    "reduce(습관성 반복의 횟수 축소)는 줄어드는 비율 / "
-                    "substitute(저렴한 대안 대체)는 절약되는 비율 / "
-                    "keep(꼭 필요)은 ratio 0\n"
+                    "reduce(습관성 반복의 횟수·양 축소)는 줄어드는 비율 / "
+                    "keep(꼭 필요)은 ratio 0. 특정 대체품·대체처를 "
+                    "제안하는 판정은 하지 말 것\n"
                     "3. 확보 합계(품목 금액 합 × ratio)가 목표 절감액의 "
                     "90~115%가 되도록 판정을 구성\n"
                     "4. 비슷한 품목은 한 그룹으로 묶기 (그룹 4~6개 이내)\n"
                     "5. action에 '40% 감소' 같은 퍼센트·비율 표현 금지. "
                     "구체적 행동만: hold는 '다음 달로 미루기'류, reduce는 "
-                    "무엇을 덜 하는지(예: '주말에만 방문'), substitute는 "
-                    "무엇으로 바꾸는지(예: '홈케어로 대체')를 명시\n"
-                    "6. substitute의 대안은 품목 목록에서 확실히 통하는 "
-                    "일반적 방식(집에서 하기, 보유품 활용, 저가 라인 등)만. "
-                    "약국·특정 매장·브랜드처럼 더 싼지 확신할 수 없는 "
-                    "판매처를 단정하지 말 것\n"
-                    "7. 확보 합계가 목표에 못 미칠 것 같으면 keep을 "
+                    "무엇을 덜 하는지(예: '주말에만 방문')를 명시\n"
+                    "6. 확보 합계가 목표에 못 미칠 것 같으면 keep을 "
                     "최소화해서라도 목표에 최대한 근접시키기"),
                 messages=[{"role": "user", "content":
                            f"카테고리: {category}\n"
@@ -219,6 +215,8 @@ def _get_item_verdicts(category: str, target: int, items: list[dict],
             parsed = json.loads(text[lb:rb + 1])
             assert isinstance(parsed, list) and parsed
             for g in parsed:
+                if g.get("verdict") == "substitute":  # 방어: 대체 판정 흡수
+                    g["verdict"] = "reduce"
                 assert g["verdict"] in VERDICT_META
                 g["item_ids"] = [int(i) for i in g["item_ids"]]
                 assert all(0 <= i < len(items) for i in g["item_ids"])
@@ -280,7 +278,6 @@ def render_item_plan(targets: dict[str, int],
             st.markdown("🛑 **보류** — 이번 달엔 이 구매를 하지 않기  \n"
                         "⏸ **횟수 줄이기** — 반복 구매의 횟수를 낮추기 "
                         "(옆에 '관측 N회 → M회'로 표시)  \n"
-                        "🔁 **대체** — 더 저렴한 대안으로 바꾸기  \n"
                         "✅ **유지** — 지금처럼 써도 괜찮은 것")
         if any(g.get("_fallback") for g in verdicts):
             err = st.session_state.get(f"vrd_err_{category}_{target}", "")
@@ -410,14 +407,21 @@ with st.sidebar:
         st.session_state.profile_defaults = (870000, 3480000, 12, 0)
         st.session_state.messages = []
 
-    uploaded = st.file_uploader("내 CSV 업로드", type="csv",
-                                help="필수 컬럼: date, description, amount")
+    uploaded = st.file_uploader(
+        "내 CSV 업로드", type="csv",
+        help="어떤 형식이든 OK — 토스·뱅크샐러드·카드사 내보내기 등 컬럼명이 "
+             "달라도 자동으로 인식해요. (날짜·내역·금액 정보만 있으면 됩니다)")
     if uploaded is not None and st.session_state.get("uploaded_name") != uploaded.name:
-        df = pd.read_csv(uploaded)
-        need = {"date", "description", "amount"}
-        if not need.issubset(df.columns):
-            st.error(f"필수 컬럼 누락: {need - set(df.columns)}")
-        else:
+        try:
+            df, ingest_path = flex_ingest(uploaded.getvalue(), get_api_key())
+            if ingest_path != "standard":
+                st.info(f"컬럼 형식을 자동 인식해 변환했어요 "
+                        f"({'AI 매핑' if ingest_path == 'ai' else '자동 매핑'}, "
+                        f"{len(df)}건)")
+        except ValueError as e:
+            st.error(str(e))
+            df = None
+        if df is not None:
             if "category" not in df.columns or "is_discretionary" not in df.columns:
                 with st.spinner("AI가 거래 내역을 분류하는 중..."):
                     items = df[["description", "amount"]].to_dict("records")
