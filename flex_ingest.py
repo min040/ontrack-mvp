@@ -11,6 +11,8 @@
    - 내역: 남은 컬럼 중 텍스트 다양성이 가장 높은 컬럼
 3. 휴리스틱 실패 시 AI(Haiku)가 헤더+샘플 행을 보고 매핑 (temperature 0)
 """
+__version__ = "ingest-v10"
+
 import io
 import json
 import re
