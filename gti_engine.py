@@ -13,6 +13,8 @@ GTI (Goal Track Index) 계산 엔진
     is_discretionary: 재량 지출 여부 (True=재량, False=필수)
     ※ category, is_discretionary는 MVP에서 LLM 분류 결과가 채워줌
 """
+__version__ = "engine-v10"
+
 
 from dataclasses import dataclass, asdict
 import pandas as pd
@@ -547,7 +549,10 @@ def detect_anomalies(transactions: pd.DataFrame) -> list[dict]:
                               f"왜곡이 있을 수 있고, 기록이 쌓일수록 정확해져요."})
 
     # 대량 구매일: 일 지출이 중앙값의 3배 이상 & 10만원 초과
-    daily = pos.groupby(pos["date"].dt.date)["amount"].sum()
+    # (월세·구독 등 월정기 지출은 '몰아 구매'가 아니므로 제외)
+    rec_mask = _recurring_mask(pos)
+    nonrec = pos[~rec_mask]
+    daily = nonrec.groupby(nonrec["date"].dt.date)["amount"].sum()
     med = daily.median()
     for d, v in daily.items():
         if v > max(3 * med, 100000):
