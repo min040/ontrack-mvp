@@ -147,6 +147,7 @@ def _get_item_verdicts(category: str, target: int, items: list[dict],
 
     api_key = get_api_key()
     verdicts = None
+    last_err = None
     for _attempt in range(2 if api_key else 0):
         try:
             import anthropic
@@ -154,8 +155,12 @@ def _get_item_verdicts(category: str, target: int, items: list[dict],
             items_txt = "\n".join(
                 f"{i}. {it['description']} — {it['amount']}원"
                 for i, it in enumerate(items))
+            corrective = ("" if _attempt == 0 else
+                          "\n\n[중요] 직전 응답이 JSON 파싱에 실패했습니다. "
+                          "이번에는 반드시 '['로 시작해 ']'로 끝나는 JSON "
+                          "배열만, 다른 문자 없이 출력하세요.")
             msg = client.messages.create(
-                model=ITEM_MODEL, max_tokens=900, temperature=0,
+                model=ITEM_MODEL, max_tokens=1600, temperature=0,
                 system=(
                     "당신은 지출 코칭 판정기입니다. JSON 배열만 출력하세요. "
                     "마크다운 백틱, 설명, 다른 텍스트 금지.\n"
@@ -189,16 +194,20 @@ def _get_item_verdicts(category: str, target: int, items: list[dict],
                               f"합계는 반드시 이보다 커야 합니다 — keep을 "
                               f"줄이고, reduce의 ratio를 높이고, hold를 "
                               f"늘리세요.\n" if min_secured else "")
-                           + f"품목:\n{items_txt}"}])
+                           + f"품목:\n{items_txt}" + corrective}])
+            if msg.stop_reason == "max_tokens":
+                raise ValueError("출력이 토큰 한도에서 잘림")
             text = "".join(b.text for b in msg.content if b.type == "text")
-            text = text.strip().removeprefix("```json").removeprefix(
-                "```").removesuffix("```").strip()
-            parsed = json.loads(text)
+            # 관대한 추출: 첫 '['부터 마지막 ']'까지만 파싱
+            lb, rb = text.find("["), text.rfind("]")
+            if lb == -1 or rb == -1:
+                raise ValueError("응답에 JSON 배열이 없음")
+            parsed = json.loads(text[lb:rb + 1])
             assert isinstance(parsed, list) and parsed
             for g in parsed:
                 assert g["verdict"] in VERDICT_META
-                assert all(isinstance(i, int) and 0 <= i < len(items)
-                           for i in g["item_ids"])
+                g["item_ids"] = [int(i) for i in g["item_ids"]]
+                assert all(0 <= i < len(items) for i in g["item_ids"])
                 g["ratio"] = min(max(float(g.get("ratio", 0)), 0.0), 1.0)
                 if g["verdict"] == "hold":
                     g["ratio"] = 1.0
@@ -206,9 +215,12 @@ def _get_item_verdicts(category: str, target: int, items: list[dict],
                     g["ratio"] = 0.0
             verdicts = parsed
             break
-        except Exception:
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
             verdicts = None
     used_fallback = verdicts is None
+    if used_fallback and last_err:
+        st.session_state[f"vrd_err_{category}_{target}"] = last_err
     if used_fallback:
         verdicts = fallback()
         for g in verdicts:
@@ -240,8 +252,10 @@ def render_item_plan(targets: dict[str, int],
                         "🔁 **대체** — 더 저렴한 대안으로 바꾸기  \n"
                         "✅ **유지** — 지금처럼 써도 괜찮은 것")
         if any(g.get("_fallback") for g in verdicts):
+            err = st.session_state.get(f"vrd_err_{category}_{target}", "")
             st.warning("AI 판정 연결이 잠시 안 돼서 '금액 큰 순 보류' 기본 "
-                       "플랜을 보여드리고 있어요.")
+                       "플랜을 보여드리고 있어요."
+                       + (f" (원인: {err[:120]})" if err else ""))
             if st.button("🔄 AI 플랜 다시 생성",
                          key=f"regen_{category}_{target}"):
                 st.session_state.pop(f"vrd_{category}_{target}", None)
@@ -277,22 +291,32 @@ def render_item_plan(targets: dict[str, int],
             hide_index=True, width='stretch')
         st.progress(pct, text=f"확보 {won(secured)} / 목표 {won(target)}")
 
-        # 유지 항목은 별도 표로 — '안 줄여도 되는 것'도 명확한 정보
+        # 유지 항목은 별도 표로 — '안 줄여도 되는 것'도 명확한 정보.
+        # AI가 판정에서 빠뜨린 품목은 자동으로 '유지'로 분류해 항상 표시.
         keep_rows = []
-        for g in verdicts:
-            if g["ratio"] == 0 or g["verdict"] == "keep":
-                k_names = " · ".join(items[i]["description"]
-                                     for i in g["item_ids"][:3])
-                if len(g["item_ids"]) > 3:
-                    k_names += f" 외 {len(g['item_ids']) - 3}건"
-                k_amt = sum(items[i]["amount"] for i in g["item_ids"])
-                keep_rows.append({"품목": k_names,
-                                  "지출 (관측 기간)": won(k_amt),
-                                  "이유": g.get("action") or "생활 유지 필요"})
+        covered = {i for g in verdicts for i in g["item_ids"]}
+        uncovered = [i for i in range(len(items)) if i not in covered]
+        keep_groups = [g for g in verdicts
+                       if g["ratio"] == 0 or g["verdict"] == "keep"]
+        if uncovered:
+            keep_groups.append({"item_ids": uncovered,
+                                "action": "절감 대상에서 제외 — 유지"})
+        for g in keep_groups:
+            k_names = " · ".join(items[i]["description"]
+                                 for i in g["item_ids"][:3])
+            if len(g["item_ids"]) > 3:
+                k_names += f" 외 {len(g['item_ids']) - 3}건"
+            k_amt = sum(items[i]["amount"] for i in g["item_ids"])
+            keep_rows.append({"품목": k_names,
+                              "지출 (관측 기간)": won(k_amt),
+                              "이유": g.get("action") or "생활 유지 필요"})
+        st.markdown("**✅ 그대로 둬도 되는 것**")
         if keep_rows:
-            st.markdown("**✅ 그대로 둬도 되는 것**")
             st.dataframe(pd.DataFrame(keep_rows), hide_index=True,
                          width='stretch')
+        else:
+            st.caption("이번 플랜은 목표 달성을 위해 모든 품목을 절감 "
+                       "대상으로 판정했어요 — 유지 항목이 없습니다.")
         st.caption("확보 금액은 관측 기간 실지출 기준 추정치예요.")
         secured_map[category] = secured
     return secured_map
