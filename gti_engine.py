@@ -41,6 +41,15 @@ RECURRING_CATEGORIES = {"주거", "통신", "구독", "보험"}
 # ---------------------------------------------------------------
 # 내부 유틸
 # ---------------------------------------------------------------
+def _month_periods(df: pd.DataFrame) -> int:
+    """관측 기간이 몇 '달'에 해당하는지 (30일 단위 반올림, 최소 1).
+    월정기 지출이 여러 달치 관측되면 그 수로 나눠 월 비용을 구함.
+    (검증에서 발견: 60일 데이터에서 월세가 2회 합산돼 고정비 2배 버그)"""
+    dates = pd.to_datetime(df["date"])
+    days = (dates.max() - dates.min()).days + 1
+    return max(round(days / 30), 1)
+
+
 def _monthly_scale(df: pd.DataFrame) -> float:
     """관측 기간이 한 달 미만이면 30일 기준으로 환산하는 배율."""
     dates = pd.to_datetime(df["date"])
@@ -114,7 +123,8 @@ def calc_gti(profile: UserProfile, transactions: pd.DataFrame,
     fixed = transactions[~transactions["is_discretionary"]]
     recurring_mask = _recurring_mask(fixed)
     # 월정기 고정비: 금액 그대로 / 일반 고정비(식비 등): 관측기간 → 월 환산
-    e_fix = (fixed.loc[recurring_mask, "amount"].sum()
+    periods = _month_periods(transactions)
+    e_fix = (fixed.loc[recurring_mask, "amount"].sum() / periods
              + fixed.loc[~recurring_mask, "amount"].sum() * scale)
     e_var = transactions.loc[transactions["is_discretionary"], "amount"].sum() * scale
 
@@ -497,8 +507,10 @@ def get_spending_summary(transactions: pd.DataFrame) -> dict:
             "category": r["category"],
             "is_discretionary": bool(r["is_discretionary"]),
             "total": int(r["sum"]),
-            "monthly_estimate": round(r["sum"] if r["category"] in RECURRING_CATEGORIES
-                                      else r["sum"] * scale),
+            "monthly_estimate": round(
+                r["sum"] / _month_periods(transactions)
+                if r["category"] in RECURRING_CATEGORIES
+                else r["sum"] * scale),
             "count": int(r["count"]),
         }
         for _, r in by_cat.iterrows()
