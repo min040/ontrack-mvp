@@ -125,11 +125,12 @@ VERDICT_META = {
 }
 
 
-def _get_item_verdicts(category: str, target: int,
-                       items: list[dict]) -> list[dict]:
+def _get_item_verdicts(category: str, target: int, items: list[dict],
+                       min_secured: int | None = None) -> list[dict]:
     """AI가 각 품목의 처분을 JSON으로 판정. 품목은 번호(id)로만 지목하게
-    해서 이름·금액 왜곡을 차단. 실패 시 확정적 폴백(큰 금액 순 보류)."""
-    key = f"vrd_{category}_{target}"
+    해서 이름·금액 왜곡을 차단. 실패 시 확정적 폴백(큰 금액 순 보류).
+    min_secured: 추가 절감 플랜에서 '직전 플랜보다 반드시 더 확보' 강제."""
+    key = f"vrd_{category}_{target}_{min_secured or 0}"
     if key in st.session_state:
         return st.session_state[key]
 
@@ -173,10 +174,22 @@ def _get_item_verdicts(category: str, target: int,
                     "5. action에 '40% 감소' 같은 퍼센트·비율 표현 금지. "
                     "구체적 행동만: hold는 '다음 달로 미루기'류, reduce는 "
                     "무엇을 덜 하는지(예: '주말에만 방문'), substitute는 "
-                    "무엇으로 바꾸는지(예: '홈케어로 대체')를 명시"),
+                    "무엇으로 바꾸는지(예: '홈케어로 대체')를 명시\n"
+                    "6. substitute의 대안은 품목 목록에서 확실히 통하는 "
+                    "일반적 방식(집에서 하기, 보유품 활용, 저가 라인 등)만. "
+                    "약국·특정 매장·브랜드처럼 더 싼지 확신할 수 없는 "
+                    "판매처를 단정하지 말 것\n"
+                    "7. 확보 합계가 목표에 못 미칠 것 같으면 keep을 "
+                    "최소화해서라도 목표에 최대한 근접시키기"),
                 messages=[{"role": "user", "content":
                            f"카테고리: {category}\n"
-                           f"월 절감 목표: {target}원\n품목:\n{items_txt}"}])
+                           f"월 절감 목표: {target}원\n"
+                           + (f"중요: 직전 완화 플랜의 확보 합계는 "
+                              f"{min_secured}원이었습니다. 이번 플랜의 확보 "
+                              f"합계는 반드시 이보다 커야 합니다 — keep을 "
+                              f"줄이고, reduce의 ratio를 높이고, hold를 "
+                              f"늘리세요.\n" if min_secured else "")
+                           + f"품목:\n{items_txt}"}])
             text = "".join(b.text for b in msg.content if b.type == "text")
             text = text.strip().removeprefix("```json").removeprefix(
                 "```").removesuffix("```").strip()
@@ -204,16 +217,21 @@ def _get_item_verdicts(category: str, target: int,
     return verdicts
 
 
-def render_item_plan(targets: dict[str, int]) -> None:
+def render_item_plan(targets: dict[str, int],
+                     min_secured: dict[str, int] | None = None) -> dict:
     """구조화된 절감 실행 플랜 렌더링 — 금액 큰 행동 순, 진행 바 포함.
-    (판정은 AI, 금액 합산·정렬·진행률은 전부 코드가 확정 계산)"""
+    (판정은 AI, 금액 합산·정렬·진행률은 전부 코드가 확정 계산)
+    반환: {카테고리: 확보액} — 추가 절감 플랜의 에스컬레이션 기준."""
+    secured_map = {}
     for category, target in targets.items():
         base = suggest_items(tx, category, max(target, 1))
         items = base["all_items"]
         if not items:
             st.info(f"{category}에 조절 가능한 구매 내역이 없어요.")
             continue
-        verdicts = _get_item_verdicts(category, target, items)
+        verdicts = _get_item_verdicts(
+            category, target, items,
+            min_secured=(min_secured or {}).get(category))
 
         with st.expander("아이콘이 뭘 뜻하나요?"):
             st.markdown("🛑 **보류** — 이번 달엔 이 구매를 하지 않기  \n"
@@ -250,7 +268,6 @@ def render_item_plan(targets: dict[str, int]) -> None:
             secured += amt
         act = sorted([r for r in rows if r["_amt"] > 0],
                      key=lambda r: -r["_amt"])[:5]
-        keeps = [r["품목"] for r in rows if r["_amt"] == 0]
 
         pct = min(secured / target, 1.0) if target else 0
         st.markdown(f"**[{category}] 월 {won(target)} 만들기** — 아래 "
@@ -259,14 +276,31 @@ def render_item_plan(targets: dict[str, int]) -> None:
             [{k: r[k] for k in ("판정", "품목", "확보 금액")} for r in act]),
             hide_index=True, width='stretch')
         st.progress(pct, text=f"확보 {won(secured)} / 목표 {won(target)}")
-        if keeps:
-            st.caption(f"✅ 그대로 둬도 되는 것: {', '.join(keeps)}")
+
+        # 유지 항목은 별도 표로 — '안 줄여도 되는 것'도 명확한 정보
+        keep_rows = []
+        for g in verdicts:
+            if g["ratio"] == 0 or g["verdict"] == "keep":
+                k_names = " · ".join(items[i]["description"]
+                                     for i in g["item_ids"][:3])
+                if len(g["item_ids"]) > 3:
+                    k_names += f" 외 {len(g['item_ids']) - 3}건"
+                k_amt = sum(items[i]["amount"] for i in g["item_ids"])
+                keep_rows.append({"품목": k_names,
+                                  "지출 (관측 기간)": won(k_amt),
+                                  "이유": g.get("action") or "생활 유지 필요"})
+        if keep_rows:
+            st.markdown("**✅ 그대로 둬도 되는 것**")
+            st.dataframe(pd.DataFrame(keep_rows), hide_index=True,
+                         width='stretch')
         st.caption("확보 금액은 관측 기간 실지출 기준 추정치예요.")
+        secured_map[category] = secured
+    return secured_map
 
 
 def rec_with_boost(targets: dict[str, int], key_prefix: str) -> None:
     """목표 딱 맞춤 플랜 + 슬라이더를 따라가는 추가 절감 플랜."""
-    render_item_plan(targets)
+    base_secured = render_item_plan(targets)
     st.markdown('<p class="sub-note">더 공격적으로 줄여보고 싶다면 아래에서 '
                 '추가 비율을 정해보세요.</p>', unsafe_allow_html=True)
     boost = pct_control("목표 대비 추가 절감", 100, 0, f"{key_prefix}_boost")
@@ -279,7 +313,7 @@ def rec_with_boost(targets: dict[str, int], key_prefix: str) -> None:
                    for c, t in targets.items()}
         st.markdown(f"---\n**➕ 추가 {boost}% 절감 플랜** (슬라이더를 "
                     f"움직이면 자동으로 갱신돼요)")
-        render_item_plan(boosted)
+        render_item_plan(boosted, min_secured=base_secured)
     elif st.session_state.get(f"{key_prefix}_boost_on") and boost == 0:
         st.session_state[f"{key_prefix}_boost_on"] = False
 
