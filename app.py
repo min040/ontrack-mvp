@@ -8,6 +8,8 @@ v3 변경 (2차 실사용자 테스트 피드백 반영):
 - 이벤트 예산: 항목별 개별 절감률(슬라이더+직접 입력), 항목별 절감액, AI 품목 추천
 - 가속 추천 → 절감 순위 전체 공개: 순위별 이유·최대 한도·비율 조절·단축 일수·AI 품목 추천
 """
+__version__ = "app-v10"
+
 import json
 import os
 
@@ -384,7 +386,8 @@ def rec_with_boost(targets: dict[str, int], key_prefix: str) -> None:
 # ================================================================
 with st.sidebar:
     st.title("🛰️ 궤도 ON-TRACK")
-    st.caption("소비 한 건이 목표를 며칠 미뤘는지 아는 AI 자산 코칭")
+    st.caption("자산 목표의 내비게이션 — 모든 소비를 '목표까지의 "
+               "시간'으로 번역합니다")
 
     accent = st.color_picker("🎨 나만의 컨셉 색", "#0F6E56",
                              help="고른 색에 맞춰 화면 전체가 자동으로 꾸며져요.")
@@ -491,13 +494,18 @@ with st.sidebar:
 if "tx" not in st.session_state:
     with goal_output_slot:
         st.info("지출 데이터를 불러오면 계산 결과가 여기 표시돼요.")
-    st.title("소비와 목표 사이의 끊어진 다리를 잇습니다")
+    st.title("궤도는 당신의 모든 소비를 '목표까지의 시간'으로 번역합니다")
     st.markdown(
-        "가계부 앱은 **얼마 썼는지** 알려주지만, 그 소비가 **내 목표를 며칠 "
-        "미뤘는지**는 알려주지 않아요.\n\n궤도는 소비 데이터로 저축 여력을 "
-        "역산하고, 목표까지의 거리를 보여주고, AI 상담사가 모든 재무 결정을 "
-        "숫자로 답합니다.\n\n👈 왼쪽에서 **샘플 체험**을 누르거나 CSV를 올려 "
-        "시작하세요.")
+        "가계부는 **과거를 기록**해요 — \"지난달 카페에 8만원 썼어요\"까지. "
+        "그 소비가 내 목표와 무슨 관계인지는 말해주지 않죠.\n\n"
+        "궤도는 **자산 목표의 내비게이션**입니다. 내비가 \"이 길로 가면 "
+        "도착이 10분 늦어져요\"라고 알려주듯, 궤도는 모든 재무 결정을 "
+        "시간으로 답해요:\n"
+        "- 🏁 **도착 예정** — 이 페이스면 목표에 언제 도달하나\n"
+        "- 🧭 **경로 이탈 감지** — 이 소비가 목표를 며칠 미뤘나\n"
+        "- 🔁 **경로 재탐색** — 어디서 줄이면 며칠을 되찾나\n\n"
+        "👈 왼쪽에서 **샘플 체험**을 누르거나, 쓰던 가계부 CSV를 그대로 "
+        "올려 시작하세요.")
     st.stop()
 
 tx = st.session_state.tx
@@ -566,12 +574,15 @@ profile = UserProfile(monthly_income=income, current_assets=assets,
 
 st.caption(f"데이터: {st.session_state.data_label}")
 tab_dash, tab_plan, tab_chat = st.tabs(
-    ["📊 대시보드", "🧮 플래너", "💬 AI 상담사"])
+    ["🧭 진단 (대시보드)", "🔁 처방 (플래너)", "💬 상담 (AI)"])
 
 # ================================================================
 # 대시보드
 # ================================================================
 with tab_dash:
+    st.markdown('<p class="sub-note">🧭 <b>진단</b> — 지금의 소비가 목표 '
+                '도착 시간에 미치는 영향을 봅니다.</p>',
+                unsafe_allow_html=True)
     r = calc_gti(profile, tx)
 
     if r["monthly_savings_capacity"] <= 0:
@@ -598,43 +609,64 @@ with tab_dash:
             for n in anomalies:
                 st.markdown(f"- **{n['type']}** · {n['note']}")
 
-    c1, c2 = st.columns([1, 1.4])
-    with c1:
+    # ---- 히어로 지표: 내비게이션 언어(시간·행동)로 통일 ----
+    rc = required_cut(profile, tx)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("🏁 도착 예정",
+              f"{r['eta_months']}개월 뒤" if r["eta_months"]
+              else "도달 불가",
+              help="지금 소비 페이스가 유지될 때 목표에 도달하는 시점")
+    if r["monthly_savings_capacity"] <= 0:
+        route_val, route_help = "저축 정지", "지출이 소득을 넘어 경로를 이탈했어요"
+    elif r["track_ratio"] < 1.0:
+        route_val = f"{r['delay_months']}개월 늦음"
+        route_help = "목표 기한 대비 예상 지연"
+    else:
+        early = round(-r["delay_months"], 1) if r["delay_months"] else 0
+        route_val, route_help = f"{early}개월 빠름", "목표 기한보다 앞선 페이스"
+    m2.metric("🧭 경로 상태", route_val, help=route_help)
+    if r["track_ratio"] >= 1.0:
+        m3.metric("🔁 경로 재탐색", "필요 없음", help="이미 궤도 위예요")
+    elif rc.get("feasible") and rc.get("cut_ratio") is not None:
+        m3.metric("🔁 경로 재탐색", f"월 {won(rc['monthly_cut_amount'])} 절감",
+                  help="목표 기한을 지키기 위해 되찾아야 하는 금액 — "
+                       "🔁 처방 탭에서 설계")
+    else:
+        m3.metric("🔁 경로 재탐색", "목표 조정 필요",
+                  help="지출 절감만으로는 어려워요 — 상담 탭에서 대안을 "
+                       "논의해보세요")
+    st.caption(f"참고 수치 — 월 저축 여력 {won(r['monthly_savings_capacity'])} "
+               f"/ 월 요구 저축액 {won(r['monthly_required_savings'])}")
+
+    st.divider()
+    # ---- GTI: 위 상태를 압축한 '경로 준수율' 보조 지표 ----
+    g1, g2 = st.columns([1, 1.5])
+    with g1:
         g_color = (accent if r["gti"] >= ON_TRACK_GTI
                    else "#EF9F27" if r["gti"] >= 50 else "#E24B4A")
         fig = go.Figure(go.Indicator(
             mode="gauge+number", value=r["gti"],
-            title={"text": "목표 궤도 지수 (GTI)"},
+            title={"text": "GTI (경로 준수율)"},
             gauge={"axis": {"range": [0, 100]},
                    "bar": {"color": g_color},
                    "threshold": {"line": {"color": _shade(accent, -0.3),
                                           "width": 3},
                                  "value": ON_TRACK_GTI}}))
-        fig.update_layout(height=270, margin=dict(t=60, b=10, l=30, r=30))
+        fig.update_layout(height=240, margin=dict(t=55, b=10, l=30, r=30))
         st.plotly_chart(fig, width='stretch')
-        with st.expander("GTI가 뭐예요?"):
+    with g2:
+        st.markdown(
+            '<p class="big-note">GTI는 위의 도착 예정·경로 상태·소비 안정성을 '
+            '0~100 하나로 압축한 <b>경로 준수율</b>이에요 — 내비의 보조 '
+            '계기판처럼, 매일의 변화를 점수 하나로 추적할 때 쓰세요.</p>',
+            unsafe_allow_html=True)
+        with st.expander("GTI 계산 방식이 궁금해요"):
             st.markdown(
-                f"지금 소비 페이스로 목표에 도달할 수 있는지를 0~100으로 나타낸 "
-                f"점수예요.\n- **{ON_TRACK_GTI}점(굵은 선)** = 딱 목표 기한에 "
-                f"맞는 페이스 (궤도 진입선)\n- 그 위 = 목표보다 빨리 도달\n"
-                f"- 그 아래 = 이대로면 늦어요\n- 소비가 들쭉날쭉하면 계획을 "
+                f"- **{ON_TRACK_GTI}점(굵은 선)** = 딱 목표 기한에 맞는 "
+                f"페이스 (궤도 진입선)\n- 그 위 = 목표보다 빨리 도달 / "
+                f"그 아래 = 이대로면 늦어요\n- 소비가 들쭉날쭉하면 계획을 "
                 f"지키기 어렵다고 보고 점수를 살짝 깎아요. 지금 변동성 감점: "
                 f"**-{round(r['gti_before_penalty'] - r['gti'], 1)}점**")
-
-    with c2:
-        m1, m2, m3 = st.columns(3)
-        m1.metric("월 저축 여력", won(r["monthly_savings_capacity"]),
-                  help="소득 − 필수 지출 − 재량 지출")
-        m2.metric("월 요구 저축액", won(r["monthly_required_savings"]),
-                  help="(목표 금액 − 현재 자산) ÷ 목표 기한")
-        m3.metric("목표 도달 예상",
-                  f"{r['eta_months']}개월 뒤" if r["eta_months"]
-                  else "현재 페이스로 도달 불가")
-        rc = required_cut(profile, tx)
-        if r["track_ratio"] < 1.0 and rc.get("feasible") and rc.get("cut_ratio"):
-            st.info(f"궤도 진입까지: 조절 가능한 지출을 월 "
-                    f"**{won(rc['monthly_cut_amount'])}** 줄이면 돼요 → "
-                    f"🧮 플래너에서 설계")
 
     st.divider()
     st.subheader("줄일 수 있는 돈은 어디에 있나")
@@ -685,6 +717,9 @@ with tab_dash:
 # 플래너
 # ================================================================
 with tab_plan:
+    st.markdown('<p class="sub-note">🔁 <b>처방</b> — 어디서 줄이면 며칠을 '
+                '되찾을 수 있는지 경로를 다시 계산합니다.</p>',
+                unsafe_allow_html=True)
     s = get_spending_summary(tx)
     rankings = cut_rankings(profile, tx)
     disc_cats = [rk["category"] for rk in rankings]
@@ -1028,6 +1063,9 @@ def run_tool(name: str, args: dict) -> object:
 
 
 with tab_chat:
+    st.markdown('<p class="sub-note">💬 <b>상담</b> — 결정이 필요한 순간, '
+                '무엇이든 물어보면 숫자로 답합니다.</p>',
+                unsafe_allow_html=True)
     api_key = get_api_key()
     if not api_key:
         st.warning("ANTHROPIC_API_KEY가 설정되지 않아 AI 상담을 사용할 수 "
