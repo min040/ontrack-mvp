@@ -14,6 +14,8 @@
     python3 classifier.py persona_sumin.csv        # LLM 평가
     python3 classifier.py persona_sumin.csv --rule # 규칙 폴백만 평가
 """
+__version__ = "classifier-v10"
+
 import json
 import os
 import sys
