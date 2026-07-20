@@ -159,6 +159,8 @@ def _get_item_verdicts(category: str, target: int, items: list[dict],
                           "\n\n[중요] 직전 응답이 JSON 파싱에 실패했습니다. "
                           "이번에는 반드시 '['로 시작해 ']'로 끝나는 JSON "
                           "배열만, 다른 문자 없이 출력하세요.")
+            pool = sum(it["amount"] for it in items)
+            effective = min(target, pool)
             msg = client.messages.create(
                 model=ITEM_MODEL, max_tokens=1600, temperature=0,
                 system=(
@@ -189,6 +191,10 @@ def _get_item_verdicts(category: str, target: int, items: list[dict],
                 messages=[{"role": "user", "content":
                            f"카테고리: {category}\n"
                            f"월 절감 목표: {target}원\n"
+                           f"품목 총액: {pool}원 → 달성 가능한 최대 확보액도 "
+                           f"{pool}원입니다. 확보 합계를 "
+                           f"{round(effective*0.95)}원 이상으로 최대한 "
+                           f"끌어올리세요.\n"
                            + (f"중요: 직전 완화 플랜의 확보 합계는 "
                               f"{min_secured}원이었습니다. 이번 플랜의 확보 "
                               f"합계는 반드시 이보다 커야 합니다 — keep을 "
@@ -283,13 +289,24 @@ def render_item_plan(targets: dict[str, int],
         act = sorted([r for r in rows if r["_amt"] > 0],
                      key=lambda r: -r["_amt"])[:5]
 
+        pool_total = sum(it["amount"] for it in items)
         pct = min(secured / target, 1.0) if target else 0
         st.markdown(f"**[{category}] 월 {won(target)} 만들기** — 아래 "
                     f"{len(act)}개 행동으로 목표의 **{pct*100:.0f}%** 확보")
-        st.dataframe(pd.DataFrame(
-            [{k: r[k] for k in ("판정", "품목", "확보 금액")} for r in act]),
-            hide_index=True, width='stretch')
+        table_rows = [{k: r[k] for k in ("판정", "품목", "확보 금액")}
+                      for r in act]
+        table_rows.append({"판정": "Σ 합계",
+                           "품목": f"{len(act)}개 행동",
+                           "확보 금액": won(secured)})
+        st.dataframe(pd.DataFrame(table_rows), hide_index=True,
+                     width='stretch')
         st.progress(pct, text=f"확보 {won(secured)} / 목표 {won(target)}")
+        if target > pool_total:
+            st.caption(f"ℹ️ 이 카테고리의 전체 지출({won(pool_total)})이 "
+                       f"목표보다 작아서, 전부 줄여도 100% 달성은 불가능해요. "
+                       f"부족분은 다른 카테고리에서 채워야 해요.")
+        st.caption("🤖 AI 품목 추천은 목표 전액 커버를 보장하지 않아요 — "
+                   "초록 막대가 '이 플랜대로 하면 확보되는 비율'이에요.")
 
         # 유지 항목은 별도 표로 — '안 줄여도 되는 것'도 명확한 정보.
         # AI가 판정에서 빠뜨린 품목은 자동으로 '유지'로 분류해 항상 표시.
