@@ -117,101 +117,141 @@ def fmt_months(m: float) -> str:
     return f"약 {round(m, 1)}개월"
 
 
-def _rec_cache_key(categories: dict[str, int]) -> str:
-    return "rec_" + "|".join(f"{c}:{t}" for c, t in sorted(categories.items()))
+VERDICT_META = {
+    "hold": ("🛑", "이번 달 보류"),
+    "reduce": ("⏸", "횟수·빈도 줄이기"),
+    "substitute": ("🔁", "대안으로 대체"),
+    "keep": ("✅", "유지"),
+}
 
 
-def ai_item_recommendation(targets: dict[str, int]) -> str:
-    """가계부의 실제 구매 품목을 보고 '무엇을 줄일지' 추천.
-    targets: {카테고리: 월 절감 목표액}. 여러 카테고리 조합 지원.
-
-    안정성 원칙 (사용자 피드백 반영):
-    - 모든 합계·현황 숫자는 코드가 확정 계산해 프롬프트에 제공.
-      AI는 제공된 숫자만 인용하고 새 합계를 만들지 않음.
-    - temperature 0 + 출력 템플릿 고정.
-    - 같은 조건(카테고리+목표액)이면 저장된 결과를 재사용해 완전 고정.
-    """
-    key = _rec_cache_key(targets)
+def _get_item_verdicts(category: str, target: int,
+                       items: list[dict]) -> list[dict]:
+    """AI가 각 품목의 처분을 JSON으로 판정. 품목은 번호(id)로만 지목하게
+    해서 이름·금액 왜곡을 차단. 실패 시 확정적 폴백(큰 금액 순 보류)."""
+    key = f"vrd_{category}_{target}"
     if key in st.session_state:
         return st.session_state[key]
 
-    s_local = get_spending_summary(tx)
-    blocks, fallback_lines = [], []
-    for category, target in targets.items():
-        base = suggest_items(tx, category, target)
-        stat = next((c for c in s_local["categories"]
-                     if c["category"] == category and c["is_discretionary"]),
-                    None)
-        monthly = stat["monthly_estimate"] if stat else 0
-        items_txt = "\n".join(f"  - {i['description']}: {i['amount']}원"
-                              for i in base["all_items"])
-        blocks.append(
-            f"[{category}]\n"
-            f"- 관측 {s_local['observed_days']}일 실지출 합계: "
-            f"{stat['total'] if stat else 0}원 (코드가 계산한 확정값)\n"
-            f"- 월 환산 지출: {monthly}원 (확정값)\n"
-            f"- 월 절감 목표: {target}원 → 절감 후 월 예산: "
-            f"{monthly - target}원 (확정값)\n"
-            f"- 구매 품목 목록:\n{items_txt}")
-        fallback_lines.append(
-            f"**{category}** (월 {won(target)} 절감): " + ", ".join(
-                f"{i['description']}({won(i['amount'])})"
-                for i in base["picked_items"]))
+    def fallback() -> list[dict]:
+        out, acc = [], 0
+        order = sorted(range(len(items)), key=lambda j: -items[j]["amount"])
+        for idx in order:
+            if acc >= target:
+                break
+            out.append({"item_ids": [idx], "verdict": "hold", "ratio": 1.0,
+                        "action": "이번 달 구매 보류"})
+            acc += items[idx]["amount"]
+        return out
 
-    fallback = ("금액이 큰 품목부터 고르면 이렇게 만들 수 있어요:\n\n"
-                + "\n\n".join(fallback_lines))
     api_key = get_api_key()
-    if not api_key:
-        st.session_state[key] = fallback
-        return fallback
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        msg = client.messages.create(
-            model=ITEM_MODEL, max_tokens=800, temperature=0,
-            system=(
-                "당신은 지출 코칭 전문가입니다. 아래 규칙을 반드시 지키세요.\n"
-                "1. 숫자 규칙: '확정값'으로 표시된 숫자와 품목별 금액만 그대로 "
-                "인용하세요. 목록을 합산하거나 새로운 합계·평균·환산치를 직접 "
-                "계산해 만들지 마세요.\n"
-                "2. 절감 방안의 합계는 월 절감 목표에 최대한 가깝게 (목표의 "
-                "100~110% 이내). 크게 초과 달성하는 플랜을 만들지 마세요.\n"
-                "3. 출력 형식 (반드시 이 구조, 다른 섹션 추가 금지):\n"
-                "**[카테고리] 월 절감 목표 {목표}원** (현재 월 {월환산}원 → "
-                "절감 후 {절감후}원)\n"
-                "- 방안 불릿 3~5개: 반복 구매는 횟수 축소, 대형 단발 구매는 "
-                "보류/대체 제안. 품목명과 금액을 그대로 인용.\n"
-                "카테고리가 여러 개면 카테고리별로 같은 구조를 반복.\n"
-                "4. 소비를 비난하지 말 것. 존댓말, 간결하게."),
-            messages=[{"role": "user", "content": "\n\n".join(blocks)}])
-        text = "".join(b.text for b in msg.content if b.type == "text")
-        st.session_state[key] = text
-        return text
-    except Exception:
-        st.session_state[key] = fallback
-        return fallback
+    verdicts = None
+    if api_key:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            items_txt = "\n".join(
+                f"{i}. {it['description']} — {it['amount']}원"
+                for i, it in enumerate(items))
+            msg = client.messages.create(
+                model=ITEM_MODEL, max_tokens=900, temperature=0,
+                system=(
+                    "당신은 지출 코칭 판정기입니다. JSON 배열만 출력하세요. "
+                    "마크다운 백틱, 설명, 다른 텍스트 금지.\n"
+                    "각 원소: {\"item_ids\": [번호들], \"verdict\": "
+                    "\"hold|reduce|substitute|keep\", \"ratio\": 0~1 숫자, "
+                    "\"action\": \"15자 이내 행동 문구\"}\n"
+                    "규칙:\n"
+                    "1. 모든 품목 번호를 정확히 한 번씩 어느 그룹에든 배정\n"
+                    "2. hold(대형 단발 구매 보류)는 ratio 1.0 / "
+                    "reduce(습관성 반복의 횟수 축소)는 줄어드는 비율 / "
+                    "substitute(저렴한 대안 대체)는 절약되는 비율 / "
+                    "keep(꼭 필요)은 ratio 0\n"
+                    "3. 확보 합계(품목 금액 합 × ratio)가 목표 절감액의 "
+                    "90~115%가 되도록 판정을 구성\n"
+                    "4. 비슷한 품목은 한 그룹으로 묶기 (그룹 4~6개 이내)"),
+                messages=[{"role": "user", "content":
+                           f"카테고리: {category}\n"
+                           f"월 절감 목표: {target}원\n품목:\n{items_txt}"}])
+            text = "".join(b.text for b in msg.content if b.type == "text")
+            text = text.strip().removeprefix("```json").removeprefix(
+                "```").removesuffix("```").strip()
+            parsed = json.loads(text)
+            assert isinstance(parsed, list) and parsed
+            for g in parsed:
+                assert g["verdict"] in VERDICT_META
+                assert all(isinstance(i, int) and 0 <= i < len(items)
+                           for i in g["item_ids"])
+                g["ratio"] = min(max(float(g.get("ratio", 0)), 0.0), 1.0)
+                if g["verdict"] == "hold":
+                    g["ratio"] = 1.0
+                if g["verdict"] == "keep":
+                    g["ratio"] = 0.0
+            verdicts = parsed
+        except Exception:
+            verdicts = None
+    if verdicts is None:
+        verdicts = fallback()
+    st.session_state[key] = verdicts
+    return verdicts
+
+
+def render_item_plan(targets: dict[str, int]) -> None:
+    """구조화된 절감 실행 플랜 렌더링 — 금액 큰 행동 순, 진행 바 포함.
+    (판정은 AI, 금액 합산·정렬·진행률은 전부 코드가 확정 계산)"""
+    for category, target in targets.items():
+        base = suggest_items(tx, category, max(target, 1))
+        items = base["all_items"]
+        if not items:
+            st.info(f"{category}에 조절 가능한 구매 내역이 없어요.")
+            continue
+        verdicts = _get_item_verdicts(category, target, items)
+
+        rows, secured = [], 0
+        for g in verdicts:
+            amt = round(sum(items[i]["amount"] for i in g["item_ids"])
+                        * g["ratio"])
+            names = " · ".join(items[i]["description"]
+                               for i in g["item_ids"][:3])
+            if len(g["item_ids"]) > 3:
+                names += f" 외 {len(g['item_ids']) - 3}건"
+            icon, label = VERDICT_META[g["verdict"]]
+            rows.append({"판정": f"{icon} {g.get('action') or label}",
+                         "품목": names, "_amt": amt,
+                         "확보 금액": won(amt) if amt else "—"})
+            secured += amt
+        act = sorted([r for r in rows if r["_amt"] > 0],
+                     key=lambda r: -r["_amt"])[:5]
+        keeps = [r["품목"] for r in rows if r["_amt"] == 0]
+
+        pct = min(secured / target, 1.0) if target else 0
+        st.markdown(f"**[{category}] 월 {won(target)} 만들기** — 아래 "
+                    f"{len(act)}개 행동으로 목표의 **{pct*100:.0f}%** 확보")
+        st.dataframe(pd.DataFrame(
+            [{k: r[k] for k in ("판정", "품목", "확보 금액")} for r in act]),
+            hide_index=True, width='stretch')
+        st.progress(pct, text=f"확보 {won(secured)} / 목표 {won(target)}")
+        if keeps:
+            st.caption(f"✅ 그대로 둬도 되는 것: {', '.join(keeps)}")
+        st.caption("확보 금액은 관측 기간 실지출 기준 추정치예요.")
 
 
 def rec_with_boost(targets: dict[str, int], key_prefix: str) -> None:
-    """목표 딱 맞춤 추천 + '더 공격적으로' 추가 추천.
-    Streamlit 특성상 버튼은 누른 순간에만 True라서, '추천을 보여달라'는
-    상태를 session_state에 저장해 화면 갱신 후에도 유지되게 함."""
-    st.markdown(ai_item_recommendation(targets))
+    """목표 딱 맞춤 플랜 + 슬라이더를 따라가는 추가 절감 플랜."""
+    render_item_plan(targets)
     st.markdown('<p class="sub-note">더 공격적으로 줄여보고 싶다면 아래에서 '
-                '추가 비율을 정하고 다시 추천받아 보세요.</p>',
-                unsafe_allow_html=True)
+                '추가 비율을 정해보세요.</p>', unsafe_allow_html=True)
     boost = pct_control("목표 대비 추가 절감", 100, 0, f"{key_prefix}_boost")
     if boost > 0 and not st.session_state.get(f"{key_prefix}_boost_on"):
-        if st.button("🤖 이 조건으로 추가 추천 보기",
+        if st.button("🤖 이 조건으로 추가 플랜 보기",
                      key=f"{key_prefix}_boost_btn"):
             st.session_state[f"{key_prefix}_boost_on"] = True
     if st.session_state.get(f"{key_prefix}_boost_on") and boost > 0:
-        # 한 번 켜진 뒤에는 슬라이더 현재값을 자동으로 따라감
         boosted = {c: round(t * (1 + boost / 100))
                    for c, t in targets.items()}
-        st.markdown(f"---\n**➕ 추가 {boost}% 절감 플랜** (목표를 {boost}% "
-                    f"상향한 기준 — 슬라이더를 움직이면 자동으로 갱신돼요)")
-        st.markdown(ai_item_recommendation(boosted))
+        st.markdown(f"---\n**➕ 추가 {boost}% 절감 플랜** (슬라이더를 "
+                    f"움직이면 자동으로 갱신돼요)")
+        render_item_plan(boosted)
     elif st.session_state.get(f"{key_prefix}_boost_on") and boost == 0:
         st.session_state[f"{key_prefix}_boost_on"] = False
 
