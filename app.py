@@ -8,7 +8,7 @@ v3 변경 (2차 실사용자 테스트 피드백 반영):
 - 이벤트 예산: 항목별 개별 절감률(슬라이더+직접 입력), 항목별 절감액, AI 품목 추천
 - 가속 추천 → 절감 순위 전체 공개: 순위별 이유·최대 한도·비율 조절·단축 일수·AI 품목 추천
 """
-__version__ = "app-v11"
+__version__ = "app-v11.1"
 
 import json
 import os
@@ -441,30 +441,39 @@ with st.sidebar:
     if "tx" in st.session_state:
         with st.expander("➕ 오늘 지출 추가", expanded=False):
             st.markdown('<p class="sub-note">기록하는 즉시 지수와 모든 '
-                        '화면이 갱신돼요. (브라우저 세션 안에서만 유지 — '
-                        '새로고침하면 사라지니, 계속 쓰려면 CSV에 함께 '
-                        '적어두세요)</p>', unsafe_allow_html=True)
+                        '화면이 갱신돼요. 기록한 원래 금액은 그대로 저장되고, '
+                        '화면의 통계·차트는 <b>30일(월) 기준으로 환산</b>돼 '
+                        '보여요. (브라우저 세션 안에서만 유지 — 새로고침하면 '
+                        '사라지니, 계속 쓰려면 CSV에 함께 적어두세요)</p>',
+                        unsafe_allow_html=True)
             add_date = st.date_input("날짜", value=pd.Timestamp.today(),
                                      key="add_date")
             add_desc = st.text_input("내역", placeholder="예: 올리브영",
                                      key="add_desc")
             add_amt = st.number_input("금액 (원)", 0, 10_000_000, 0, 100,
                                       key="add_amt")
+            add_refund = st.checkbox("환불·취소예요 (금액이 되돌아온 경우)",
+                                     key="add_refund")
             if st.button("기록하기", width='stretch', key="add_btn")                     and add_desc.strip() and add_amt > 0:
-                preds, _ = classify(
-                    [{"description": add_desc.strip(), "amount": add_amt}],
-                    get_api_key())
-                p0 = preds[0]
+                signed = -add_amt if add_refund else add_amt
+                if add_refund:
+                    p0 = {"category": "환불", "is_discretionary": True,
+                          "is_recurring": False}
+                else:
+                    preds, _ = classify(
+                        [{"description": add_desc.strip(),
+                          "amount": signed}], get_api_key())
+                    p0 = preds[0]
                 new_row = {"date": add_date.strftime("%Y-%m-%d"),
                            "description": add_desc.strip(),
-                           "amount": add_amt,
+                           "amount": signed,
                            "category": p0["category"],
                            "is_discretionary": p0["is_discretionary"],
                            "is_recurring": p0["is_recurring"]}
                 st.session_state.tx = pd.concat(
                     [st.session_state.tx, pd.DataFrame([new_row])],
                     ignore_index=True)
-                st.session_state["_last_added"] = add_amt
+                st.session_state["_last_added"] = signed
                 st.rerun()
 
     st.subheader("2. 목표 설정")
@@ -603,10 +612,13 @@ profile = UserProfile(monthly_income=income, current_assets=assets,
 
 if "_last_added" in st.session_state:
     _amt = st.session_state.pop("_last_added")
-    _imp = purchase_impact(profile, tx, _amt)
-    if _imp.get("delay_days"):
+    _imp = purchase_impact(profile, tx, abs(_amt))
+    if _imp.get("delay_days") and _amt > 0:
         st.toast(f"기록 완료! 이 지출로 목표가 약 "
                  f"{_imp['delay_days']}일 뒤로 밀렸어요.", icon="🧭")
+    elif _imp.get("delay_days") and _amt < 0:
+        st.toast(f"환불 기록 완료! 목표가 약 "
+                 f"{_imp['delay_days']}일 앞당겨졌어요.", icon="🧭")
     else:
         st.toast("기록 완료! 지수에 반영됐어요.", icon="🧭")
 
@@ -674,7 +686,10 @@ with tab_dash:
                   help="지출 절감만으로는 어려워요 — 상담 탭에서 대안을 "
                        "논의해보세요")
     st.caption(f"참고 수치 — 월 저축 여력 {won(r['monthly_savings_capacity'])} "
-               f"/ 월 요구 저축액 {won(r['monthly_required_savings'])}")
+               f"/ 월 요구 저축액 {won(r['monthly_required_savings'])} · "
+               f"화면의 모든 통계 금액은 30일(월) 기준 환산값이에요. 기록한 "
+               f"원본 금액은 아래 '분류 근거 보기' 표에서 그대로 확인할 수 "
+               f"있어요.")
 
     st.divider()
     # ---- GTI: 위 상태를 압축한 '경로 준수율' 보조 지표 ----
