@@ -8,7 +8,7 @@ v3 변경 (2차 실사용자 테스트 피드백 반영):
 - 이벤트 예산: 항목별 개별 절감률(슬라이더+직접 입력), 항목별 절감액, AI 품목 추천
 - 가속 추천 → 절감 순위 전체 공개: 순위별 이유·최대 한도·비율 조절·단축 일수·AI 품목 추천
 """
-__version__ = "app-v10"
+__version__ = "app-v11"
 
 import json
 import os
@@ -438,6 +438,35 @@ with st.sidebar:
             st.session_state.uploaded_name = uploaded.name
             st.session_state.messages = []
 
+    if "tx" in st.session_state:
+        with st.expander("➕ 오늘 지출 추가", expanded=False):
+            st.markdown('<p class="sub-note">기록하는 즉시 지수와 모든 '
+                        '화면이 갱신돼요. (브라우저 세션 안에서만 유지 — '
+                        '새로고침하면 사라지니, 계속 쓰려면 CSV에 함께 '
+                        '적어두세요)</p>', unsafe_allow_html=True)
+            add_date = st.date_input("날짜", value=pd.Timestamp.today(),
+                                     key="add_date")
+            add_desc = st.text_input("내역", placeholder="예: 올리브영",
+                                     key="add_desc")
+            add_amt = st.number_input("금액 (원)", 0, 10_000_000, 0, 100,
+                                      key="add_amt")
+            if st.button("기록하기", width='stretch', key="add_btn")                     and add_desc.strip() and add_amt > 0:
+                preds, _ = classify(
+                    [{"description": add_desc.strip(), "amount": add_amt}],
+                    get_api_key())
+                p0 = preds[0]
+                new_row = {"date": add_date.strftime("%Y-%m-%d"),
+                           "description": add_desc.strip(),
+                           "amount": add_amt,
+                           "category": p0["category"],
+                           "is_discretionary": p0["is_discretionary"],
+                           "is_recurring": p0["is_recurring"]}
+                st.session_state.tx = pd.concat(
+                    [st.session_state.tx, pd.DataFrame([new_row])],
+                    ignore_index=True)
+                st.session_state["_last_added"] = add_amt
+                st.rerun()
+
     st.subheader("2. 목표 설정")
     d = st.session_state.get("profile_defaults", (1000000, 4000000, 12, 0))
     st.markdown('<p class="sub-note">🔴 필수 입력 — 계산의 기준이 되는 '
@@ -571,6 +600,15 @@ else:
 
 profile = UserProfile(monthly_income=income, current_assets=assets,
                       goal_amount=max(goal, 1), goal_months=months)
+
+if "_last_added" in st.session_state:
+    _amt = st.session_state.pop("_last_added")
+    _imp = purchase_impact(profile, tx, _amt)
+    if _imp.get("delay_days"):
+        st.toast(f"기록 완료! 이 지출로 목표가 약 "
+                 f"{_imp['delay_days']}일 뒤로 밀렸어요.", icon="🧭")
+    else:
+        st.toast("기록 완료! 지수에 반영됐어요.", icon="🧭")
 
 st.caption(f"데이터: {st.session_state.data_label}")
 tab_dash, tab_plan, tab_chat = st.tabs(
