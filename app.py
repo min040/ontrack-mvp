@@ -8,7 +8,7 @@ v3 변경 (2차 실사용자 테스트 피드백 반영):
 - 이벤트 예산: 항목별 개별 절감률(슬라이더+직접 입력), 항목별 절감액, AI 품목 추천
 - 가속 추천 → 절감 순위 전체 공개: 순위별 이유·최대 한도·비율 조절·단축 일수·AI 품목 추천
 """
-__version__ = "app-v11.1"
+__version__ = "app-v11.2"
 
 import json
 import os
@@ -443,8 +443,9 @@ with st.sidebar:
             st.markdown('<p class="sub-note">기록하는 즉시 지수와 모든 '
                         '화면이 갱신돼요. 기록한 원래 금액은 그대로 저장되고, '
                         '화면의 통계·차트는 <b>30일(월) 기준으로 환산</b>돼 '
-                        '보여요. (브라우저 세션 안에서만 유지 — 새로고침하면 '
-                        '사라지니, 계속 쓰려면 CSV에 함께 적어두세요)</p>',
+                        '보여요. 기록은 브라우저 세션 안에서만 유지되니, '
+                        '다음에도 이어서 쓰려면 진단 탭의 <b>분류 근거 '
+                        '보기</b>에서 현재 데이터를 CSV로 내려받아 두세요.</p>',
                         unsafe_allow_html=True)
             add_date = st.date_input("날짜", value=pd.Timestamp.today(),
                                      key="add_date")
@@ -474,19 +475,26 @@ with st.sidebar:
                     [st.session_state.tx, pd.DataFrame([new_row])],
                     ignore_index=True)
                 st.session_state["_last_added"] = signed
-                st.rerun()
+                st.session_state["_last_added_desc"] = add_desc.strip()
+                # 주의: 여기서 st.rerun()을 호출하면 아직 렌더되지 않은
+                # 아래쪽 위젯(소득·목표 등)의 입력값이 초기화되는 버그 발생.
+                # 버튼 클릭 자체가 재실행이므로 그대로 진행하면 이번 실행에서
+                # 추가된 거래가 모든 계산에 즉시 반영된다.
 
     st.subheader("2. 목표 설정")
     d = st.session_state.get("profile_defaults", (1000000, 4000000, 12, 0))
     st.markdown('<p class="sub-note">🔴 필수 입력 — 계산의 기준이 되는 '
                 '값이에요.</p>', unsafe_allow_html=True)
-    income = st.number_input("월 소득 (원) 🔴", 0, 100_000_000, d[0], 50000)
+    income = st.number_input("월 소득 (원) 🔴", 0, 100_000_000, d[0], 50000,
+                             key="in_income")
     assets = st.number_input("현재 자산 (원) 🔴", 0, 1_000_000_000, d[3],
-                             100000)
+                             100000, key="in_assets")
     st.markdown('<p class="sub-note">⚪ 선택 입력 — 아래 3번 계산 모드에 '
                 '따라 필요한 것만 쓰면 돼요.</p>', unsafe_allow_html=True)
-    goal_raw = st.number_input("목표 금액 (원) ⚪", 0, 10**9, d[1], 100000)
-    months_raw = st.number_input("목표 기한 (개월) ⚪", 1, 120, d[2])
+    goal_raw = st.number_input("목표 금액 (원) ⚪", 0, 10**9, d[1], 100000,
+                               key="in_goal")
+    months_raw = st.number_input("목표 기한 (개월) ⚪", 1, 120, d[2],
+                                 key="in_months")
 
     st.subheader("3. 계산 모드")
     MODE_BOTH, MODE_WHEN, MODE_HOW = "목표 점검", "기한 계산", "금액 계산"
@@ -612,15 +620,20 @@ profile = UserProfile(monthly_income=income, current_assets=assets,
 
 if "_last_added" in st.session_state:
     _amt = st.session_state.pop("_last_added")
+    _desc = st.session_state.pop("_last_added_desc", "")
     _imp = purchase_impact(profile, tx, abs(_amt))
     if _imp.get("delay_days") and _amt > 0:
-        st.toast(f"기록 완료! 이 지출로 목표가 약 "
-                 f"{_imp['delay_days']}일 뒤로 밀렸어요.", icon="🧭")
+        st.session_state["_record_banner"] = (
+            f"🧭 **방금 기록: {_desc} {won(_amt)}** — 이 지출로 목표 도착이 "
+            f"약 **{_imp['delay_days']}일** 뒤로 밀렸어요.")
     elif _imp.get("delay_days") and _amt < 0:
-        st.toast(f"환불 기록 완료! 목표가 약 "
-                 f"{_imp['delay_days']}일 앞당겨졌어요.", icon="🧭")
+        st.session_state["_record_banner"] = (
+            f"🧭 **환불 기록: {_desc} {won(-_amt)}** — 목표 도착이 약 "
+            f"**{_imp['delay_days']}일** 앞당겨졌어요!")
     else:
-        st.toast("기록 완료! 지수에 반영됐어요.", icon="🧭")
+        kind = "환불 기록" if _amt < 0 else "방금 기록"
+        st.session_state["_record_banner"] = (
+            f"🧭 **{kind}: {_desc} {won(abs(_amt))}** — 지수에 반영됐어요.")
 
 st.caption(f"데이터: {st.session_state.data_label}")
 tab_dash, tab_plan, tab_chat = st.tabs(
@@ -633,6 +646,8 @@ with tab_dash:
     st.markdown('<p class="sub-note">🧭 <b>진단</b> — 지금의 소비가 목표 '
                 '도착 시간에 미치는 영향을 봅니다.</p>',
                 unsafe_allow_html=True)
+    if st.session_state.get("_record_banner"):
+        st.success(st.session_state["_record_banner"])
     r = calc_gti(profile, tx)
 
     if r["monthly_savings_capacity"] <= 0:
@@ -757,8 +772,17 @@ with tab_dash:
         st.markdown(
             "AI 분류기가 거래 한 건 한 건을 판정했어요. 기준: 기본 식사·정기권·"
             "구독·주거·통신·의료 = **필수** / 카페·뷰티·패션·외식·택시 = "
-            "**재량**. 아래 표에서 직접 확인하고, 잘못된 분류가 있으면 CSV의 "
-            "`is_discretionary` 값을 고쳐 다시 올리면 돼요.")
+            "**재량**. 오늘 추가로 기록한 지출도 이 표에 바로 반영돼요.\n\n"
+            "잘못된 분류가 있다면 — 아래 버튼으로 **현재 데이터 전체**"
+            "(분류 컬럼 포함)를 내려받아 해당 값을 고친 뒤 다시 올리면 돼요. "
+            "어떤 형식의 가계부에서 시작했든, 내려받은 파일에는 항상 분류 "
+            "컬럼이 들어있어요. 오늘 기록한 지출을 **다음에도 이어서 쓰고 "
+            "싶을 때**도 이 버튼으로 보관하세요.")
+        st.download_button(
+            "⬇️ 현재 데이터 CSV 내려받기 (분류·오늘 기록 포함)",
+            tx.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"ontrack_data_{pd.Timestamp.today():%Y%m%d}.csv",
+            mime="text/csv", width='stretch')
         view = tx.copy()
         view["구분"] = view["is_discretionary"].map({True: "재량", False: "필수"})
         st.dataframe(view[["date", "description", "category", "구분", "amount"]]
