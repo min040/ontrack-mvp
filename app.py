@@ -8,7 +8,7 @@ v3 변경 (2차 실사용자 테스트 피드백 반영):
 - 이벤트 예산: 항목별 개별 절감률(슬라이더+직접 입력), 항목별 절감액, AI 품목 추천
 - 가속 추천 → 절감 순위 전체 공개: 순위별 이유·최대 한도·비율 조절·단축 일수·AI 품목 추천
 """
-__version__ = "app-v11.3"
+__version__ = "app-v11.4"
 
 import json
 import os
@@ -459,6 +459,7 @@ with st.sidebar:
                 df_s["is_discretionary"] = [p["is_discretionary"]
                                             for p in preds]
                 df_s["is_recurring"] = [p["is_recurring"] for p in preds]
+        df_s["is_manual"] = False
         st.session_state.tx = df_s
         st.session_state.data_label = f"샘플 {smp['label']}"
         st.session_state.profile_defaults = smp["defaults"]
@@ -470,6 +471,15 @@ with st.sidebar:
         st.session_state["in_assets"] = smp["defaults"][3]
         st.session_state.messages = []
         st.session_state.pop("_record_banner", None)
+
+    # 심사자·사용자가 샘플의 원본 파일을 직접 열어볼 수 있도록 제공
+    st.download_button(
+        "⬇️ 이 샘플의 원본 CSV 내려받기",
+        open(SAMPLES[sample_key]["file"], "rb").read(),
+        file_name=SAMPLES[sample_key]["file"], mime="text/csv",
+        width='stretch',
+        help="서비스가 읽어들이기 전의 원본 파일이에요. 데이터 특성(형식·"
+             "기간·환불 포함 여부 등)을 직접 확인할 수 있어요.")
 
     uploaded = st.file_uploader(
         "내 CSV 업로드", type="csv",
@@ -494,6 +504,7 @@ with st.sidebar:
                     df["is_discretionary"] = [p["is_discretionary"] for p in preds]
                     df["is_recurring"] = [p["is_recurring"] for p in preds]
                     st.info(f"분류 완료 ({'AI' if path == 'llm' else '규칙 기반'})")
+            df["is_manual"] = False  # 업로드 데이터는 항상 기준 데이터
             st.session_state.tx = df
             st.session_state.data_label = f"업로드: {uploaded.name}"
             st.session_state.uploaded_name = uploaded.name
@@ -529,6 +540,7 @@ with st.sidebar:
                 new_row = {"date": add_date.strftime("%Y-%m-%d"),
                            "description": add_desc.strip(),
                            "amount": signed,
+                           "is_manual": True,
                            "category": p0["category"],
                            "is_discretionary": p0["is_discretionary"],
                            "is_recurring": p0["is_recurring"]}
@@ -845,6 +857,23 @@ with tab_dash:
             tx.to_csv(index=False).encode("utf-8-sig"),
             file_name=f"ontrack_data_{pd.Timestamp.today():%Y%m%d}.csv",
             mime="text/csv", width='stretch')
+        st.markdown(
+            "**내려받은 파일의 컬럼 의미** (엑셀에서 날짜 칸이 `#####`로 "
+            "보이면 열 너비를 넓히면 보여요)\n"
+            "| 컬럼 | 의미 | 값 |\n|---|---|---|\n"
+            "| date | 거래 날짜 | YYYY-MM-DD |\n"
+            "| description | 거래 내역 | 텍스트 |\n"
+            "| amount | 금액 | 지출은 양수, 환불은 음수 |\n"
+            "| category | 카테고리 | 식비·카페·뷰티 등 |\n"
+            "| is_discretionary | **재량 여부** | TRUE=재량(조절 가능) / "
+            "FALSE=필수(줄이기 어려움) |\n"
+            "| is_recurring | **월정기 여부** | TRUE=매달 반복(월세·구독·"
+            "정기권) / FALSE=일반 |\n"
+            "| is_manual | 앱에서 직접 기록 | TRUE=오늘 지출 추가로 입력 / "
+            "FALSE=업로드·샘플 |\n\n"
+            "분류를 고치려면 `is_discretionary`·`is_recurring` 값을 "
+            "TRUE/FALSE로 바꾸거나 `category` 이름을 수정한 뒤 다시 "
+            "업로드하세요.")
         view = tx.copy()
         view["구분"] = view["is_discretionary"].map({True: "재량", False: "필수"})
         st.dataframe(view[["date", "description", "category", "구분", "amount"]]
