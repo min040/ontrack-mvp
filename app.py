@@ -8,7 +8,7 @@ v3 변경 (2차 실사용자 테스트 피드백 반영):
 - 이벤트 예산: 항목별 개별 절감률(슬라이더+직접 입력), 항목별 절감액, AI 품목 추천
 - 가속 추천 → 절감 순위 전체 공개: 순위별 이유·최대 한도·비율 조절·단축 일수·AI 품목 추천
 """
-__version__ = "app-v11.4"
+__version__ = "app-v11.5"
 
 import json
 import os
@@ -403,6 +403,9 @@ with st.sidebar:
         st.rerun()
     inject_theme(accent)
 
+    import gti_engine as _eng
+    st.caption(f"버전: {__version__} / {_eng.__version__}")
+
     st.subheader("1. 지출 데이터")
     SAMPLES = {
         "수민": {"file": "persona_sumin.csv", "std": True,
@@ -774,7 +777,13 @@ with tab_dash:
         m3.metric("🔁 경로 재탐색", "목표 조정 필요",
                   help="지출 절감만으로는 어려워요 — 상담 탭에서 대안을 "
                        "논의해보세요")
-    st.caption(f"참고 수치 — 월 저축 여력 {won(r['monthly_savings_capacity'])} "
+    _obs = get_spending_summary(tx)["observed_days"]
+    _man = int(tx["is_manual"].sum()) if "is_manual" in tx.columns else 0
+    st.caption(
+        f"환산 기준 — 관측 {_obs}일"
+        + (f" (직접 기록 {_man}건은 관측 기간을 늘리지 않고 합산)"
+           if _man else "")
+        + f" · 월 저축 여력 {won(r['monthly_savings_capacity'])} "
                f"/ 월 요구 저축액 {won(r['monthly_required_savings'])} · "
                f"화면의 모든 통계 금액은 30일(월) 기준 환산값이에요. 기록한 "
                f"원본 금액은 아래 '분류 근거 보기' 표에서 그대로 확인할 수 "
