@@ -8,7 +8,7 @@ v3 변경 (2차 실사용자 테스트 피드백 반영):
 - 이벤트 예산: 항목별 개별 절감률(슬라이더+직접 입력), 항목별 절감액, AI 품목 추천
 - 가속 추천 → 절감 순위 전체 공개: 순위별 이유·최대 한도·비율 조절·단축 일수·AI 품목 추천
 """
-__version__ = "app-v11.2"
+__version__ = "app-v11.3"
 
 import json
 import os
@@ -404,11 +404,72 @@ with st.sidebar:
     inject_theme(accent)
 
     st.subheader("1. 지출 데이터")
-    if st.button("샘플 체험 (대학생 수민)", width='stretch'):
-        st.session_state.tx = pd.read_csv("persona_sumin.csv")
-        st.session_state.data_label = "샘플 페르소나 '수민' (21일)"
-        st.session_state.profile_defaults = (870000, 3480000, 12, 0)
+    SAMPLES = {
+        "수민": {"file": "persona_sumin.csv", "std": True,
+                 "label": "기본 — 실측 21일 (대학생 수민)",
+                 "defaults": (870000, 3480000, 12, 0),
+                 "desc": "개발자 실측 지출을 익명화한 기준 데이터. 시즌성 "
+                         "대량 구매·반복 습관·환불이 섞인 현실적 패턴이에요."},
+        "A": {"file": "test_a_7days.csv", "std": False,
+              "label": "A — 짧은 관측 (7일)",
+              "defaults": (1000000, 2000000, 6, 0),
+              "desc": "데이터가 아주 짧은 경우. '짧은 관측 기간' 특이사항 "
+                      "경고와 월 환산의 불확실성 안내를 확인해보세요."},
+        "B": {"file": "test_b_30days.csv", "std": False,
+              "label": "B — 표준 1개월 (30일, 월세·구독)",
+              "defaults": (1500000, 3000000, 12, 0),
+              "desc": "정확히 한 달치 기준 케이스. 월세·구독이 월정기로 "
+                      "분류되고 환산 왜곡 없이 계산되는 걸 확인해보세요."},
+        "C": {"file": "test_c_60days.csv", "std": False,
+              "label": "C — 다개월 (60일, 월세 2회 포함)",
+              "defaults": (1500000, 3000000, 12, 0),
+              "desc": "두 달치 데이터. 월세가 2번 찍혀 있어도 주거비가 "
+                      "월 350,000원(1회분)으로 정확히 환산되는지 — 월정기 "
+                      "분리 환산의 검증 케이스예요."},
+        "D": {"file": "test_d_bankstyle.csv", "std": False,
+              "label": "D — 은행 내보내기 형식 (EUC-KR·출금/입금·환불)",
+              "defaults": (1000000, 3000000, 12, 0),
+              "desc": "컬럼명(거래일시/적요/출금액/입금액)과 인코딩이 전혀 "
+                      "다른 은행 스타일. 자동 인식 변환 알림과 환불 1건의 "
+                      "순지출 반영을 확인해보세요."},
+        "E": {"file": "test_e_cardstyle.csv", "std": False,
+              "label": "E — 카드사 형식 (이용일·쉼표 금액)",
+              "defaults": (1000000, 3000000, 12, 0),
+              "desc": "카드사 스타일 컬럼(이용일/이용하신곳/이용금액)과 "
+                      "쉼표 금액('12,000'). 컬럼 자동 매핑을 확인해보세요."},
+    }
+    sample_key = st.selectbox(
+        "샘플 데이터 선택", list(SAMPLES),
+        format_func=lambda k: SAMPLES[k]["label"],
+        help="특성이 다른 6가지 샘플로 서비스의 데이터 처리 능력을 "
+             "확인할 수 있어요.")
+    st.markdown(f'<p class="sub-note">{SAMPLES[sample_key]["desc"]}</p>',
+                unsafe_allow_html=True)
+    if st.button("이 샘플 불러오기", width='stretch'):
+        smp = SAMPLES[sample_key]
+        if smp["std"]:
+            df_s = pd.read_csv(smp["file"])
+        else:
+            with st.spinner("샘플 데이터를 인식·분류하는 중..."):
+                df_s, _ = flex_ingest(open(smp["file"], "rb").read(),
+                                      get_api_key())
+                items = df_s[["description", "amount"]].to_dict("records")
+                preds, _path = classify(items, get_api_key())
+                df_s["category"] = [p["category"] for p in preds]
+                df_s["is_discretionary"] = [p["is_discretionary"]
+                                            for p in preds]
+                df_s["is_recurring"] = [p["is_recurring"] for p in preds]
+        st.session_state.tx = df_s
+        st.session_state.data_label = f"샘플 {smp['label']}"
+        st.session_state.profile_defaults = smp["defaults"]
+        # 키 있는 위젯은 기본값 자동 갱신이 안 되므로 직접 설정
+        # (이 시점엔 목표 설정 위젯이 아직 렌더 전이라 안전)
+        st.session_state["in_income"] = smp["defaults"][0]
+        st.session_state["in_goal"] = smp["defaults"][1]
+        st.session_state["in_months"] = smp["defaults"][2]
+        st.session_state["in_assets"] = smp["defaults"][3]
         st.session_state.messages = []
+        st.session_state.pop("_record_banner", None)
 
     uploaded = st.file_uploader(
         "내 CSV 업로드", type="csv",
@@ -550,8 +611,9 @@ if "tx" not in st.session_state:
         "- 🏁 **도착 예정** — 이 페이스면 목표에 언제 도달하나\n"
         "- 🧭 **경로 이탈 감지** — 이 소비가 목표를 며칠 미뤘나\n"
         "- 🔁 **경로 재탐색** — 어디서 줄이면 며칠을 되찾나\n\n"
-        "👈 왼쪽에서 **샘플 체험**을 누르거나, 쓰던 가계부 CSV를 그대로 "
-        "올려 시작하세요.")
+        "👈 왼쪽에서 **샘플 데이터를 골라 불러오거나**, 쓰던 가계부 CSV를 "
+        "그대로 올려 시작하세요. 특성이 다른 6가지 샘플로 서비스의 데이터 "
+        "처리 능력을 직접 검증할 수 있어요.")
     st.stop()
 
 tx = st.session_state.tx
