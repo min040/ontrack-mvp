@@ -13,7 +13,7 @@ GTI (Goal Track Index) 계산 엔진
     is_discretionary: 재량 지출 여부 (True=재량, False=필수)
     ※ category, is_discretionary는 MVP에서 LLM 분류 결과가 채워줌
 """
-__version__ = "engine-v10"
+__version__ = "engine-v11"
 
 
 from dataclasses import dataclass, asdict
@@ -43,20 +43,38 @@ RECURRING_CATEGORIES = {"주거", "통신", "구독", "보험"}
 # ---------------------------------------------------------------
 # 내부 유틸
 # ---------------------------------------------------------------
+def _base_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """관측 기간 산정의 기준이 되는 행(= 업로드/샘플로 들어온 원본 데이터).
+    앱에서 사용자가 직접 기록한 행(is_manual=True)은 제외한다."""
+    if "is_manual" not in df.columns:
+        return df
+    base = df[df["is_manual"] != True]  # noqa: E712
+    return base if not base.empty else df
+
+
+def _span_days(df: pd.DataFrame) -> int:
+    """관측 기간(일). 수동 기록은 기간을 늘리지 않는다.
+
+    [검증에서 발견한 버그] 원본 데이터의 마지막 날짜보다 한참 뒤에 지출을
+    기록하면 그 사이 '기록하지 않은 날들'이 지출 0원인 날로 계산되어,
+    월 환산 배율이 희석되고 지출을 추가했는데 GTI가 오르는 역전이 발생했다.
+    수동 기록은 현재 관측 기간의 소비에 합산되도록 하여 이를 차단한다.
+    (불변식: 지출 기록은 GTI를 절대 올리지 않는다)
+    """
+    dates = pd.to_datetime(_base_rows(df)["date"])
+    return max((dates.max() - dates.min()).days + 1, 1)
+
+
 def _month_periods(df: pd.DataFrame) -> int:
     """관측 기간이 몇 '달'에 해당하는지 (30일 단위 반올림, 최소 1).
     월정기 지출이 여러 달치 관측되면 그 수로 나눠 월 비용을 구함.
     (검증에서 발견: 60일 데이터에서 월세가 2회 합산돼 고정비 2배 버그)"""
-    dates = pd.to_datetime(df["date"])
-    days = (dates.max() - dates.min()).days + 1
-    return max(round(days / 30), 1)
+    return max(round(_span_days(df) / 30), 1)
 
 
 def _monthly_scale(df: pd.DataFrame) -> float:
     """관측 기간이 한 달 미만이면 30일 기준으로 환산하는 배율."""
-    dates = pd.to_datetime(df["date"])
-    observed_days = (dates.max() - dates.min()).days + 1
-    return 30.0 / max(observed_days, 1)
+    return 30.0 / _span_days(df)
 
 
 def _weekly_discretionary_cv(df: pd.DataFrame) -> float:
@@ -65,16 +83,22 @@ def _weekly_discretionary_cv(df: pd.DataFrame) -> float:
     - 7일 단위로 잘라 완전한 주만 사용
     - 완전한 주가 2개 미만이면 일 단위 CV로 대체 (18일 데이터도 동작하도록)
     - 지출이 없으면 0
+    - 환불(음수)은 제외: 변동성은 '소비 리듬'을 재는 지표이므로 환불을
+      불안정 신호로 오인해 페널티가 붙던 문제를 차단
+      (불변식: 환불 기록은 GTI를 절대 낮추지 않는다)
     """
-    disc = df[df["is_discretionary"]].copy()
+    disc = df[df["is_discretionary"] & (df["amount"] > 0)].copy()
     if disc.empty:
         return 0.0
     disc["date"] = pd.to_datetime(disc["date"])
-    start = pd.to_datetime(df["date"]).min()
-    disc["week_idx"] = ((disc["date"] - start).dt.days // 7)
-
-    total_days = (pd.to_datetime(df["date"]).max() - start).days + 1
-    full_weeks = total_days // 7
+    # 주 구간도 관측 기간(_span_days)과 동일한 창을 사용한다.
+    # 수동 기록이 창을 늘리면 '기록 없는 빈 주'가 생겨 변동성이 폭증하고
+    # GTI가 널뛰던 문제가 있었다. 창 밖의 수동 기록은 마지막 주에 합산.
+    start = pd.to_datetime(_base_rows(df)["date"]).min()
+    total_days = _span_days(df)
+    full_weeks = max(total_days // 7, 1)
+    disc["week_idx"] = (((disc["date"] - start).dt.days // 7)
+                        .clip(lower=0, upper=full_weeks - 1))
     weekly = (
         disc[disc["week_idx"] < full_weeks]
         .groupby("week_idx")["amount"].sum()
@@ -522,8 +546,7 @@ def get_spending_summary(transactions: pd.DataFrame) -> dict:
         key=lambda c: c["total"], reverse=True,
     )
     return {
-        "observed_days": int((pd.to_datetime(transactions["date"]).max()
-                              - pd.to_datetime(transactions["date"]).min()).days + 1),
+        "observed_days": int(_span_days(transactions)),
         "total_spent": int(transactions["amount"].sum()),
         "categories": categories,
         "top_discretionary": disc_sorted[:3],
@@ -540,7 +563,7 @@ def detect_anomalies(transactions: pd.DataFrame) -> list[dict]:
     notes = []
     df = transactions.copy()
     df["date"] = pd.to_datetime(df["date"])
-    days = (df["date"].max() - df["date"].min()).days + 1
+    days = _span_days(transactions)
     pos = df[df["amount"] > 0]
 
     if days < 30:
