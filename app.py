@@ -8,7 +8,7 @@ v3 변경 (2차 실사용자 테스트 피드백 반영):
 - 이벤트 예산: 항목별 개별 절감률(슬라이더+직접 입력), 항목별 절감액, AI 품목 추천
 - 가속 추천 → 절감 순위 전체 공개: 순위별 이유·최대 한도·비율 조절·단축 일수·AI 품목 추천
 """
-__version__ = "app-v11.7"
+__version__ = "app-v11.8"
 
 import json
 import os
@@ -70,6 +70,14 @@ def inject_theme(accent: str) -> None:
       .stTabs [aria-selected="true"] {{ color: {dark} !important;
         border-bottom-color: {accent} !important; font-weight: 700; }}
       .stButton > button {{ border-color: {accent}; color: {dark}; }}
+      .stButton > button[kind="primary"],
+      [data-testid="stBaseButton-primary"] {{ background:{dark} !important;
+        color:#ffffff !important; border-color:{dark} !important;
+        font-weight:800 !important; }}
+      .stButton > button[kind="primary"]:hover,
+      [data-testid="stBaseButton-primary"]:hover {{ background:{accent}
+        !important; color:#ffffff !important;
+        border-color:{dark} !important; }}
       .stButton > button:hover {{ background: {soft}; border-color: {dark}; }}
       div[data-testid="stSlider"] [role="slider"] {{ background: {accent}; }}
       .big-note {{ font-size: 1.05rem; color: {dark}; font-weight: 600; }}
@@ -477,22 +485,29 @@ with st.sidebar:
                 '아래 <b>[이 샘플 불러오기]</b> 버튼을 눌러야 화면에 '
                 '반영됩니다. 다른 샘플로 바꿀 때도 매번 눌러주세요.</p>',
                 unsafe_allow_html=True)
+    @st.cache_data(show_spinner=False)
+    def _load_sample(path: str, is_std: bool, _key: str | None):
+        """샘플을 읽어 분류까지 마친 표준 DataFrame 반환.
+        캐시하는 이유: AI 분류는 호출마다 결과가 미세하게 달라질 수 있어,
+        같은 샘플을 다시 불러올 때 지수가 바뀌는 비일관성이 발생했다.
+        파일별로 한 번만 분류하고 재사용해 항상 같은 값을 보장한다."""
+        if is_std:
+            d = pd.read_csv(path)
+        else:
+            d, _ = flex_ingest(open(path, "rb").read(), _key)
+            preds, _p = classify(d[["description", "amount"]]
+                                 .to_dict("records"), _key)
+            d["category"] = [q["category"] for q in preds]
+            d["is_discretionary"] = [q["is_discretionary"] for q in preds]
+            d["is_recurring"] = [q["is_recurring"] for q in preds]
+        d["is_manual"] = False
+        return d
+
     if st.button("✅ 이 샘플 불러오기 (필수)", width='stretch',
                  type="primary"):
         smp = SAMPLES[sample_key]
-        if smp["std"]:
-            df_s = pd.read_csv(smp["file"])
-        else:
-            with st.spinner("샘플 데이터를 인식·분류하는 중..."):
-                df_s, _ = flex_ingest(open(smp["file"], "rb").read(),
-                                      get_api_key())
-                items = df_s[["description", "amount"]].to_dict("records")
-                preds, _path = classify(items, get_api_key())
-                df_s["category"] = [p["category"] for p in preds]
-                df_s["is_discretionary"] = [p["is_discretionary"]
-                                            for p in preds]
-                df_s["is_recurring"] = [p["is_recurring"] for p in preds]
-        df_s["is_manual"] = False
+        with st.spinner("샘플 데이터를 인식·분류하는 중..."):
+            df_s = _load_sample(smp["file"], smp["std"], get_api_key())
         st.session_state.tx = df_s
         st.session_state.data_label = f"샘플 {smp['label']}"
         st.session_state.profile_defaults = smp["defaults"]
@@ -569,7 +584,11 @@ with st.sidebar:
                     preds, _ = classify(
                         [{"description": add_desc.strip(),
                           "amount": signed}], get_api_key())
-                    p0 = preds[0]
+                    p0 = dict(preds[0])
+                # 직접 기록은 항상 '해당 시점의 1회 지출'로 반영한다.
+                # (월정기로 분류되면 환산식이 달라져, 같은 금액을 기록한 뒤
+                #  환불해도 지수가 원래 값으로 돌아오지 않는 문제가 있었다)
+                p0["is_recurring"] = False
                 new_row = {"date": add_date.strftime("%Y-%m-%d"),
                            "description": add_desc.strip(),
                            "amount": signed,
