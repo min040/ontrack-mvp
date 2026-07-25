@@ -8,7 +8,7 @@ v3 변경 (2차 실사용자 테스트 피드백 반영):
 - 이벤트 예산: 항목별 개별 절감률(슬라이더+직접 입력), 항목별 절감액, AI 품목 추천
 - 가속 추천 → 절감 순위 전체 공개: 순위별 이유·최대 한도·비율 조절·단축 일수·AI 품목 추천
 """
-__version__ = "app-v11.8"
+__version__ = "app-v12.0"
 
 import json
 import os
@@ -567,15 +567,23 @@ with st.sidebar:
                         '다음에도 이어서 쓰려면 진단 탭의 <b>분류 근거 '
                         '보기</b>에서 현재 데이터를 CSV로 내려받아 두세요.</p>',
                         unsafe_allow_html=True)
-            add_date = st.date_input("날짜", value=pd.Timestamp.today(),
-                                     key="add_date")
-            add_desc = st.text_input("내역", placeholder="예: 올리브영",
-                                     key="add_desc")
-            add_amt = st.number_input("금액 (원)", 0, 10_000_000, 0, 100,
-                                      key="add_amt")
-            add_refund = st.checkbox("환불·취소예요 (금액이 되돌아온 경우)",
-                                     key="add_refund")
-            if st.button("기록하기", width='stretch', key="add_btn")                     and add_desc.strip() and add_amt > 0:
+            # 폼으로 감싸 기록 후 입력값을 모두 초기화한다.
+            # (환불 체크가 남아 있으면 다음 기록이 의도치 않게 환불로
+            #  처리되어 지수가 어긋난 것처럼 보이는 문제 방지)
+            # 지출/환불을 '상태(체크박스)'가 아니라 '버튼'으로 분리한다.
+            # 체크 상태가 남아 다음 기록이 의도치 않게 환불로 처리되면
+            # 지수가 어긋난 것처럼 보이므로, 매 기록의 종류를 명시적으로
+            # 선택하게 해 그 가능성을 원천 차단.
+            with st.form("add_tx_form", clear_on_submit=True):
+                add_date = st.date_input("날짜", value=pd.Timestamp.today())
+                add_desc = st.text_input("내역", placeholder="예: 올리브영")
+                add_amt = st.number_input("금액 (원)", 0, 10_000_000, 0, 100)
+                _c1, _c2 = st.columns(2)
+                _spend = _c1.form_submit_button("지출 기록", width='stretch',
+                                                type="primary")
+                _refund = _c2.form_submit_button("환불 기록", width='stretch')
+            add_refund = bool(_refund)
+            if (_spend or _refund) and add_desc.strip() and add_amt > 0:
                 signed = -add_amt if add_refund else add_amt
                 if add_refund:
                     p0 = {"category": "환불", "is_discretionary": True,
