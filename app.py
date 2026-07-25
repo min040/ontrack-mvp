@@ -8,7 +8,7 @@ v3 변경 (2차 실사용자 테스트 피드백 반영):
 - 이벤트 예산: 항목별 개별 절감률(슬라이더+직접 입력), 항목별 절감액, AI 품목 추천
 - 가속 추천 → 절감 순위 전체 공개: 순위별 이유·최대 한도·비율 조절·단축 일수·AI 품목 추천
 """
-__version__ = "app-v11.5"
+__version__ = "app-v11.7"
 
 import json
 import os
@@ -79,6 +79,18 @@ def inject_theme(accent: str) -> None:
         margin:1px; }}
       .pill.out {{ background:{dark}; color:#fff; }}
       .mode-arrow {{ color:{dark}; font-weight:800; margin:0 4px; }}
+      .tab-note {{ font-size:1.05rem; color:{dark}; font-weight:700;
+        background:{soft}; padding:8px 12px; border-radius:8px;
+        border-left:5px solid {accent}; margin-bottom:6px; }}
+      .key-note {{ font-size:0.98rem; color:{dark}; font-weight:600;
+        background:{soft}; padding:8px 12px; border-radius:8px;
+        margin:4px 0; }}
+      .data-badge {{ display:inline-block; font-size:1.05rem;
+        font-weight:800; color:#fff; background:{dark};
+        padding:5px 14px; border-radius:14px; margin-bottom:4px; }}
+      .cta-note {{ font-size:0.92rem; color:{dark}; font-weight:700;
+        background:{soft}; padding:7px 10px; border-radius:8px;
+        border:1px dashed {accent}; margin:4px 0; }}
       span[data-baseweb="tag"] {{ background:{soft} !important;
         color:{dark} !important; }}
       span[data-baseweb="tag"] svg {{ fill:{dark} !important; }}
@@ -409,38 +421,51 @@ with st.sidebar:
     st.subheader("1. 지출 데이터")
     SAMPLES = {
         "수민": {"file": "persona_sumin.csv", "std": True,
-                 "label": "기본 — 실측 21일 (대학생 수민)",
+                 "name": "기본 — 실측 데이터 (대학생 수민)",
                  "defaults": (870000, 3480000, 12, 0),
                  "desc": "개발자 실측 지출을 익명화한 기준 데이터. 시즌성 "
                          "대량 구매·반복 습관·환불이 섞인 현실적 패턴이에요."},
         "A": {"file": "test_a_7days.csv", "std": False,
-              "label": "A — 짧은 관측 (7일)",
-              "defaults": (1000000, 2000000, 6, 0),
+              "name": "A — 짧은 관측",
+              "defaults": (1000000, 4450000, 6, 0),
               "desc": "데이터가 아주 짧은 경우. '짧은 관측 기간' 특이사항 "
                       "경고와 월 환산의 불확실성 안내를 확인해보세요."},
         "B": {"file": "test_b_30days.csv", "std": False,
-              "label": "B — 표준 1개월 (30일, 월세·구독)",
-              "defaults": (1500000, 3000000, 12, 0),
+              "name": "B — 표준 1개월 (월세·구독)",
+              "defaults": (1500000, 9510000, 12, 0),
               "desc": "정확히 한 달치 기준 케이스. 월세·구독이 월정기로 "
                       "분류되고 환산 왜곡 없이 계산되는 걸 확인해보세요."},
         "C": {"file": "test_c_60days.csv", "std": False,
-              "label": "C — 다개월 (60일, 월세 2회 포함)",
-              "defaults": (1500000, 3000000, 12, 0),
+              "name": "C — 다개월 (월세 2회 포함)",
+              "defaults": (1500000, 10320000, 12, 0),
               "desc": "두 달치 데이터. 월세가 2번 찍혀 있어도 주거비가 "
                       "월 350,000원(1회분)으로 정확히 환산되는지 — 월정기 "
                       "분리 환산의 검증 케이스예요."},
         "D": {"file": "test_d_bankstyle.csv", "std": False,
-              "label": "D — 은행 내보내기 형식 (EUC-KR·출금/입금·환불)",
-              "defaults": (1000000, 3000000, 12, 0),
+              "name": "D — 은행 형식 (EUC-KR·출금/입금·환불)",
+              "defaults": (1000000, 5760000, 12, 0),
               "desc": "컬럼명(거래일시/적요/출금액/입금액)과 인코딩이 전혀 "
                       "다른 은행 스타일. 자동 인식 변환 알림과 환불 1건의 "
                       "순지출 반영을 확인해보세요."},
         "E": {"file": "test_e_cardstyle.csv", "std": False,
-              "label": "E — 카드사 형식 (이용일·쉼표 금액)",
-              "defaults": (1000000, 3000000, 12, 0),
+              "name": "E — 카드사 형식 (이용일·쉼표 금액)",
+              "defaults": (1000000, 3050000, 12, 0),
               "desc": "카드사 스타일 컬럼(이용일/이용하신곳/이용금액)과 "
                       "쉼표 금액('12,000'). 컬럼 자동 매핑을 확인해보세요."},
     }
+    @st.cache_data(show_spinner=False)
+    def _span_of(path: str) -> tuple[int, int]:
+        """샘플 파일의 실제 (건수, 관측일수)를 파일에서 직접 계산.
+        라벨에 기간을 하드코딩하면 파일이 바뀌었을 때 화면 표기와
+        어긋나므로(검증에서 '7일' 라벨 vs 실제 6일 불일치 발견) 자동화."""
+        d = flex_ingest(open(path, "rb").read())[0]
+        dt = pd.to_datetime(d["date"])
+        return len(d), int((dt.max() - dt.min()).days + 1)
+
+    for _v in SAMPLES.values():
+        _n, _d = _span_of(_v["file"])
+        _v["label"] = f"{_v['name']} · {_d}일 {_n}건"
+
     sample_key = st.selectbox(
         "샘플 데이터 선택", list(SAMPLES),
         format_func=lambda k: SAMPLES[k]["label"],
@@ -448,7 +473,12 @@ with st.sidebar:
              "확인할 수 있어요.")
     st.markdown(f'<p class="sub-note">{SAMPLES[sample_key]["desc"]}</p>',
                 unsafe_allow_html=True)
-    if st.button("이 샘플 불러오기", width='stretch'):
+    st.markdown('<p class="cta-note">👇 선택만으로는 적용되지 않아요 — '
+                '아래 <b>[이 샘플 불러오기]</b> 버튼을 눌러야 화면에 '
+                '반영됩니다. 다른 샘플로 바꿀 때도 매번 눌러주세요.</p>',
+                unsafe_allow_html=True)
+    if st.button("✅ 이 샘플 불러오기 (필수)", width='stretch',
+                 type="primary"):
         smp = SAMPLES[sample_key]
         if smp["std"]:
             df_s = pd.read_csv(smp["file"])
@@ -712,7 +742,8 @@ if "_last_added" in st.session_state:
         st.session_state["_record_banner"] = (
             f"🧭 **{kind}: {_desc} {won(abs(_amt))}** — 지수에 반영됐어요.")
 
-st.caption(f"데이터: {st.session_state.data_label}")
+st.markdown(f'<p class="data-badge">✅ 적용된 데이터: '
+            f'{st.session_state.data_label}</p>', unsafe_allow_html=True)
 tab_dash, tab_plan, tab_chat = st.tabs(
     ["🧭 진단 (대시보드)", "🔁 처방 (플래너)", "💬 상담 (AI)"])
 
@@ -720,8 +751,7 @@ tab_dash, tab_plan, tab_chat = st.tabs(
 # 대시보드
 # ================================================================
 with tab_dash:
-    st.markdown('<p class="sub-note">🧭 <b>진단</b> — 지금의 소비가 목표 '
-                '도착 시간에 미치는 영향을 봅니다.</p>',
+    st.markdown('<p class="tab-note">🧭 <b>진단</b> — 지금의 소비가 목표 도착 시간에 미치는 영향을 봅니다.</p>',
                 unsafe_allow_html=True)
     if st.session_state.get("_record_banner"):
         st.success(st.session_state["_record_banner"])
@@ -779,15 +809,16 @@ with tab_dash:
                        "논의해보세요")
     _obs = get_spending_summary(tx)["observed_days"]
     _man = int(tx["is_manual"].sum()) if "is_manual" in tx.columns else 0
-    st.caption(
-        f"환산 기준 — 관측 {_obs}일"
+    st.markdown(
+        '<p class="key-note">'
+        + f"📐 환산 기준 — 관측 <b>{_obs}일</b>"
         + (f" (직접 기록 {_man}건은 관측 기간을 늘리지 않고 합산)"
            if _man else "")
         + f" · 월 저축 여력 {won(r['monthly_savings_capacity'])} "
-               f"/ 월 요구 저축액 {won(r['monthly_required_savings'])} · "
-               f"화면의 모든 통계 금액은 30일(월) 기준 환산값이에요. 기록한 "
-               f"원본 금액은 아래 '분류 근거 보기' 표에서 그대로 확인할 수 "
-               f"있어요.")
+               f"/ 월 요구 저축액 {won(r['monthly_required_savings'])}<br>"
+        + "화면의 모든 통계 금액은 <b>30일(월) 기준 환산값</b>이에요. "
+        + "기록한 원본 금액은 아래 '분류 근거 보기' 표에서 그대로 확인할 수 "
+        + "있어요.</p>", unsafe_allow_html=True)
 
     st.divider()
     # ---- GTI: 위 상태를 압축한 '경로 준수율' 보조 지표 ----
@@ -806,6 +837,10 @@ with tab_dash:
         fig.update_layout(height=240, margin=dict(t=55, b=10, l=30, r=30))
         st.plotly_chart(fig, width='stretch')
     with g2:
+        if r["track_ratio"] >= 1.2:
+            st.info("이미 요구 저축 속도의 120%를 넘어 **GTI가 상한 구간**에 "
+                    "있어요. 이 구간에서는 소액 지출·환불이 점수를 바꾸지 "
+                    "않고, 도착 예정일에만 반영돼요.")
         st.markdown(
             '<p class="big-note">GTI는 위의 도착 예정·경로 상태·소비 안정성을 '
             '0~100 하나로 압축한 <b>경로 준수율</b>이에요 — 내비의 보조 '
@@ -894,8 +929,7 @@ with tab_dash:
 # 플래너
 # ================================================================
 with tab_plan:
-    st.markdown('<p class="sub-note">🔁 <b>처방</b> — 어디서 줄이면 며칠을 '
-                '되찾을 수 있는지 경로를 다시 계산합니다.</p>',
+    st.markdown('<p class="tab-note">🔁 <b>처방</b> — 어디서 줄이면 며칠을 되찾을 수 있는지 경로를 다시 계산합니다.</p>',
                 unsafe_allow_html=True)
     s = get_spending_summary(tx)
     rankings = cut_rankings(profile, tx)
@@ -1240,8 +1274,7 @@ def run_tool(name: str, args: dict) -> object:
 
 
 with tab_chat:
-    st.markdown('<p class="sub-note">💬 <b>상담</b> — 결정이 필요한 순간, '
-                '무엇이든 물어보면 숫자로 답합니다.</p>',
+    st.markdown('<p class="tab-note">💬 <b>상담</b> — 결정이 필요한 순간, 무엇이든 물어보면 숫자로 답합니다.</p>',
                 unsafe_allow_html=True)
     api_key = get_api_key()
     if not api_key:
