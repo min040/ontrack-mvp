@@ -13,7 +13,7 @@ GTI (Goal Track Index) 계산 엔진
     is_discretionary: 재량 지출 여부 (True=재량, False=필수)
     ※ category, is_discretionary는 MVP에서 LLM 분류 결과가 채워줌
 """
-__version__ = "engine-v11"
+__version__ = "engine-v12"
 
 
 from dataclasses import dataclass, asdict
@@ -87,7 +87,12 @@ def _weekly_discretionary_cv(df: pd.DataFrame) -> float:
       불안정 신호로 오인해 페널티가 붙던 문제를 차단
       (불변식: 환불 기록은 GTI를 절대 낮추지 않는다)
     """
-    disc = df[df["is_discretionary"] & (df["amount"] > 0)].copy()
+    # 변동성은 '관측된 소비 리듬'을 재는 지표이므로 원본 데이터에서만 산출한다.
+    # (앱에서 직접 기록한 한 건이 리듬 평가 전체를 뒤집어, 지출을 추가했는데
+    #  변동성 개선 효과로 GTI가 오르거나, 추가→환불 왕복 후 원래 점수로
+    #  돌아오지 않던 문제를 차단)
+    base = _base_rows(df)
+    disc = base[base["is_discretionary"] & (base["amount"] > 0)].copy()
     if disc.empty:
         return 0.0
     disc["date"] = pd.to_datetime(disc["date"])
@@ -113,7 +118,8 @@ def _weekly_discretionary_cv(df: pd.DataFrame) -> float:
     # 폴백: 일 단위 CV (0원인 날 포함해 전체 기간으로 계산)
     daily = (
         disc.groupby(disc["date"].dt.date)["amount"].sum()
-        .reindex(pd.date_range(start, pd.to_datetime(df["date"]).max()).date,
+        .reindex(pd.date_range(start,
+                               pd.to_datetime(base["date"]).max()).date,
                  fill_value=0)
     )
     if daily.mean() <= 0:
