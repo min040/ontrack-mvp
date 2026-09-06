@@ -193,7 +193,7 @@ def _get_item_verdicts(category: str, target: int, items: list[dict],
             pool = sum(it["amount"] for it in items)
             effective = min(target, pool)
             msg = client.messages.create(
-                model=ITEM_MODEL, max_tokens=1600, temperature=0,
+                model=ITEM_MODEL, max_tokens=1600, 
                 system=(
                     "당신은 지출 코칭 판정기입니다. JSON 배열만 출력하세요. "
                     "마크다운 백틱, 설명, 다른 텍스트 금지.\n"
