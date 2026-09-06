@@ -89,7 +89,7 @@ def _ai_map(df: pd.DataFrame, api_key: str) -> dict | None:
     client = anthropic.Anthropic(api_key=api_key)
     sample = df.head(3).to_csv(index=False)
     msg = client.messages.create(
-        model="claude-haiku-4-5-20251001", max_tokens=300, temperature=0,
+        model="claude-haiku-4-5-20251001", max_tokens=300, 
         system=("가계부 CSV의 컬럼 역할을 판별해 JSON만 출력: "
                 '{"date": 날짜컬럼명, "description": 내역컬럼명, '
                 '"amount_out": 지출금액컬럼명, "amount_in": 입금컬럼명또는null}'
