@@ -259,7 +259,6 @@ def _get_item_verdicts(category: str, target: int, items: list[dict],
             last_err = f"{type(e).__name__}: {e}"
             verdicts = None
     used_fallback = verdicts is None
-    st.warning(f"[디버그] api_key={bool(api_key)} / last_err={last_err}")
     if used_fallback and last_err:
         st.session_state[f"vrd_err_{category}_{target}"] = last_err
     if used_fallback:
